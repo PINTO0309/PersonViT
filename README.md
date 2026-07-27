@@ -30,6 +30,58 @@ ViT-S/16 and ViT-B/16 use the same 16 x 16 patch size but have different model c
 
 In short, use a `PersonViT` checkpoint when training on a new ReID dataset, and use the matching `PersonViTReID` checkpoint when reproducing or evaluating the released supervised results. Always select the configuration that matches both the architecture (`small` or `base`) and the target dataset.
 
+### Choosing weights for production
+
+There is no single checkpoint that is optimal for every deployment because ReID accuracy is sensitive to differences in cameras, illumination, viewpoints, clothing, occlusion, detector quality, and image resolution. The recommended production model is therefore a PersonViT checkpoint fine-tuned and validated on data collected from the target environment.
+
+If target-domain fine-tuning is not yet available, the following released models are reasonable starting points:
+
+| Deployment requirement | Suggested starting point |
+| --- | --- |
+| Accuracy-oriented GPU deployment | `msmt.vitb.lup.256x128.wopt.csk.4-8.ar.375.n8.e0260/transformer_120.pth` |
+| Latency- or memory-constrained deployment | `msmt.vits.lup.256x128.wopt.csk.4-8.ar.375.n8.e0220/transformer_120.pth` |
+| Deployment dominated by partial occlusion | Also evaluate the corresponding `occ_duke` model |
+| Supervised fine-tuning on a new deployment dataset | Initialize from `checkpoint0260.pth` for ViT-B/16 or `checkpoint0220.pth` for ViT-S/16, then fine-tune on the target identities |
+
+The MSMT17 models are useful general baselines because MSMT17 contains more varied cameras, indoor and outdoor scenes, time slots, and lighting conditions than the other released fine-tuning datasets. This does **not** guarantee the best performance in a new domain. Benchmark scores from different datasets are not directly comparable; for example, a higher Market1501 mAP does not prove that the Market1501 model will generalize better to a production camera network.
+
+Within the same dataset, ViT-B/16 provides higher released benchmark accuracy, while ViT-S/16 has a much smaller model and lower inference cost. On MSMT17, the released logs report 80.8% mAP / 92.0% Rank-1 for ViT-B/16 and 74.3% mAP / 88.8% Rank-1 for ViT-S/16. Actual latency and memory usage should be measured on the target hardware with the intended batch size and inference runtime.
+
+The supervised classifier in `transformer_120.pth` predicts identities from its training benchmark and should not be used as a production identity classifier. In production, use the model as an embedding extractor: obtain the 384-dimensional ViT-S/16 or 768-dimensional ViT-B/16 feature, apply L2 normalization, compare embeddings with cosine similarity or Euclidean distance, and calibrate the match threshold using held-out target-domain data. Report false-accept and false-reject rates at the selected threshold in addition to retrieval metrics such as mAP and Rank-1.
+
+### Comparison with OSNet
+
+[OSNet](https://openaccess.thecvf.com/content_ICCV_2019/html/Zhou_Omni-Scale_Feature_Learning_for_Person_Re-Identification_ICCV_2019_paper.html) is a useful lightweight CNN baseline for evaluating the accuracy/efficiency trade-off of PersonViT. A practical comparison should include OSNet x1.0, PersonViT-S/16, and PersonViT-B/16. For deployment without target-domain adaptation, [OSNet-AIN x1.0](https://arxiv.org/abs/1910.06827) is also relevant because it was designed for improved cross-domain generalization.
+
+| Model | Parameters | GFLOPs at 256 x 128 | Embedding dimension | Typical use |
+| --- | ---: | ---: | ---: | --- |
+| OSNet x1.0 | 2.2M | 0.98 | 512 | Edge or real-time deployment |
+| PersonViT-S/16 | 22.0M | 2.94 | 384 | Balanced accuracy and inference cost |
+| PersonViT-B/16 | 86.5M | 11.35 | 768 | Accuracy-oriented GPU deployment |
+
+The OSNet complexity values are from the [official Torchreid model zoo](https://kaiyangzhou.github.io/deep-person-reid/MODEL_ZOO.html). The PersonViT values are calculated from the models in this repository with a 256 x 128 input and a 16 x 16 stride. Runtime latency can differ from FLOPs and must be measured with the target hardware and inference backend.
+
+The following published checkpoint results are shown as **Rank-1 / mAP** and are useful as an off-the-shelf reference:
+
+| Model | Market1501 | DukeMTMC-reID | MSMT17 |
+| --- | ---: | ---: | ---: |
+| OSNet x1.0 | 94.2 / 82.6 | 87.0 / 70.2 | 74.9 / 43.8 |
+| PersonViT-S/16 | 96.8 / 92.9 | 91.9 / 84.7 | 88.8 / 74.3 |
+| PersonViT-B/16 | 97.6 / 95.0 | 93.8 / 88.1 | 92.0 / 80.8 |
+
+OSNet results are from the [official model zoo](https://kaiyangzhou.github.io/deep-person-reid/MODEL_ZOO.html), and PersonViT results are from the [released fine-tuning logs](https://huggingface.co/lakeAGI/PersonViTReID). These numbers are **not a controlled architecture-only comparison**: the released models use different pre-training, loss functions, optimizers, data augmentation, and evaluation details. In particular, the OSNet model-zoo baseline uses softmax loss, while PersonViT uses softmax and triplet losses.
+
+For a fair deployment comparison:
+
+1. Use exactly the same person detections, crops, query/gallery split, and 256 x 128 input resolution.
+2. Keep each model's expected pixel normalization; OSNet uses ImageNet normalization, while the released PersonViT configuration uses mean and standard deviation `[0.5, 0.5, 0.5]`.
+3. L2-normalize both embeddings, use the same distance metric, and disable re-ranking.
+4. Measure mAP, Rank-1, false-accept and false-reject rates, batch-1 p50/p95 latency, throughput, peak memory, and model size.
+5. Use the same hardware, precision (FP32 or FP16), runtime, batch size, and warm-up procedure.
+6. Report results separately for operational conditions such as occlusion, low resolution, nighttime, and individual cameras.
+
+As a starting point, prefer OSNet x1.0 when latency and memory are the primary constraints, PersonViT-S/16 when a moderate compute budget is available, and PersonViT-B/16 when retrieval accuracy is the priority. The final choice should be based on validation data collected from the actual deployment environment.
+
 ## ReID Fine-tuning and  Evaluating
 first download the pretrained models from [ViT-S/16](https://huggingface.co/lakeAGI/PersonViT/tree/main/vits.lup.256x128.wopt.csk.4-8.ar.375.n8) and save it to pretrained
 ```shell
