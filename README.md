@@ -88,3 +88,98 @@ first download the pretrained models from [ViT-S/16](https://huggingface.co/lake
 cd transreid_pytorch
 sh run_epochs.sh ../pretrained/vits.lup.256x128.wopt.csk.4-8.ar.375.n8/ vits.lup.256x128.wopt.csk.4-8.ar.375.n8 220 0 2 small
 ```
+
+## ONNX export
+
+[`export_onnx.py`](export_onnx.py) exports all eight supervised PersonViTReID models (four datasets, each with ViT-S/16 and ViT-B/16) to the [`onnx`](onnx) directory. Missing PyTorch checkpoints are downloaded from the pinned `lakeAGI/PersonViTReID` revision automatically.
+
+Install the export and validation dependencies, then run:
+
+```shell
+pip install huggingface_hub onnx onnxruntime onnxsim
+python export_onnx.py
+```
+
+The fixed-batch models are listed below. Each one is accompanied by a dynamic-
+batch model with `_n` before the extension; for example,
+`personvit_market_vits16_e0220_n.onnx`.
+
+| Dataset | ViT-S/16 | ViT-B/16 |
+| --- | --- | --- |
+| Market1501 | `personvit_market_vits16_e0220.onnx` | `personvit_market_vitb16_e0260.onnx` |
+| MSMT17 | `personvit_msmt_vits16_e0220.onnx` | `personvit_msmt_vitb16_e0260.onnx` |
+| DukeMTMC-reID | `personvit_duke_vits16_e0220.onnx` | `personvit_duke_vitb16_e0260.onnx` |
+| Occluded-Duke | `personvit_occ_duke_vits16_e0220.onnx` | `personvit_occ_duke_vitb16_e0260.onnx` |
+
+The models have the following interfaces:
+
+- Fixed model: input `images` has float32 NCHW shape `[1, 3, 256, 128]`; output `embeddings` has shape `[1, 384]` for ViT-S/16 or `[1, 768]` for ViT-B/16.
+- `_n.onnx` model: the batch axis is symbolic `N`; the corresponding input and output shapes are `[N, 3, 256, 128]` and `[N, 384]` or `[N, 768]`.
+- Preprocessing: resize the RGB person crop to 256 x 128, scale pixels to `[0, 1]`, then normalize each channel with mean `[0.5, 0.5, 0.5]` and standard deviation `[0.5, 0.5, 0.5]`.
+- Output embeddings are L2 normalized.
+
+Example ONNX Runtime inference:
+
+```python
+import cv2
+import numpy as np
+import onnxruntime as ort
+
+image = cv2.imread("person.jpg")
+image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+image = cv2.resize(image, (128, 256)).astype(np.float32) / 255.0
+image = (image - 0.5) / 0.5
+images = np.transpose(image, (2, 0, 1))[None]
+
+session = ort.InferenceSession(
+    "onnx/personvit_msmt_vits16_e0220.onnx",
+    providers=["CPUExecutionProvider"],
+)
+embeddings = session.run(["embeddings"], {"images": images})[0]
+```
+
+To export only selected fixed/dynamic pairs or replace existing files:
+
+```shell
+python export_onnx.py --models market-vits16 msmt-vitb16
+python export_onnx.py --force
+```
+
+For every checkpoint, the exporter first creates and validates the fixed batch-1
+model. It then derives the `_n.onnx` graph from that model. Every `Reshape`
+target explicitly specifies all non-batch dimensions. Fixed models use `1` for
+the leading batch dimension; `_n.onnx` models use `-1` only for that leading
+dimension. Zero-copy dimensions are not used, and `-1` is never used for a
+non-batch dimension. For example, the ViT-S/16 patch embedding target is
+`[1, 384, 128]` in the fixed model and `[-1, 384, 128]` in the dynamic model.
+
+At `/backbone/Concat`, the symbolic batch size is derived locally from the
+adjacent patch embeddings. An all-1.0 tensor with shape `[N, 1, 1]` is
+multiplied by the constant CLS token `[1, 1, D]`, and the resulting `[N, 1, D]`
+tensor is concatenated with the patch embeddings. No shape-processing branch
+is added directly to the public model input.
+
+The 5-D attention transpose remains
+`[B, tokens, 3, heads, head_dim] -> [3, B, heads, tokens, head_dim]` with
+permutation `[2, 0, 3, 1, 4]`. The exporter explicitly checks all 12 such
+attention transposes in every graph, as well as the local CLS broadcast
+topology.
+
+Every fixed export is checked with the ONNX checker and simplified with
+`onnxsim`. After the N-batch graph rewrite is complete, the resulting
+`_n.onnx` model is always passed through `onnxsim` one more time. Structural
+validation and the numerical comparison with PyTorch are performed only after
+this final simplification.
+
+The final dynamic graph is shape-inferred together with its fixed batch-1
+counterpart. Every generated `unk*` dimension that is proven to correspond to
+a fixed batch dimension is canonicalized to `N`. Complete tensor type and shape
+information is then materialized for every operator input and output, including
+initializers, so graph viewers such as Netron display shapes throughout the
+model. The exporter rejects the graph if any non-`N` symbolic dimension or
+missing operator output information remains.
+
+Fixed models are tested with batch size 1, and `_n.onnx` models are tested with
+batch sizes 1 and 2. Only ONNX model files are written; no JSON manifest or
+validation report is generated. Use `python export_onnx.py --help` for
+local-checkpoint, device, validation, and model-selection options.
