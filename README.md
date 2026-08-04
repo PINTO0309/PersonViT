@@ -283,8 +283,27 @@ input resolution or a larger backbone than on a larger batch.
 ```shell
 cd transreid_pytorch
 # sh run_reid.sh <arch: small|base> <vram: 8gb|16gb|96gb> [device] [pretrain]
+
+# ViT-S/16 on an 8 GB GPU
 sh run_reid.sh small 8gb 0
+
+# ViT-B/16 on an 8 GB GPU (recommended command)
+sh run_reid.sh base 8gb 0
 ```
+
+The `base 8gb` command resolves to the following explicit invocation:
+
+```shell
+python train.py --config_file configs/reid/vit_base_8gb.yml \
+MODEL.DEVICE_ID "('0')" \
+OUTPUT_DIR logs/reid_vit_base_8gb
+```
+
+`vit_base_8gb.yml` keeps ViT-B/16 within a measured 2.4 GiB peak allocation
+by using batch 32 (8 identities x 4 instances) with the learning rate scaled
+down to 2e-4 accordingly; expect noticeably longer wall-clock time per epoch
+than ViT-S/16, since the smaller batch doubles the optimizer steps per epoch
+on top of the heavier backbone.
 
 `run_reid.sh` expects the self-supervised checkpoints at
 `../pretrained/checkpoint0220.pth` (ViT-S) and `../pretrained/checkpoint0260.pth`
