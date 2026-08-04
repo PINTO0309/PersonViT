@@ -170,7 +170,15 @@ _C.SOLVER.CHECKPOINT_PERIOD = 10
 # iteration of display training log
 _C.SOLVER.LOG_PERIOD = 100
 # epoch number of validation
-_C.SOLVER.EVAL_PERIOD = 10
+_C.SOLVER.EVAL_PERIOD = 1
+# save the best model (by validation mAP) as
+# <NAME>_best_e<epoch:06d>_map<mAP:.5f>.pth at every evaluation, keeping only
+# the latest best; disables the periodic CHECKPOINT_PERIOD snapshots
+_C.SOLVER.SAVE_BEST = False
+# path to a checkpoint_last.pth written by the trainer; restores model,
+# optimizers, scheduler, AMP scaler, epoch, best-model bookkeeping and RNG
+# states, then continues training from the next epoch
+_C.SOLVER.RESUME = ''
 # Number of images per batch
 # This is global, so if we have 8 GPUs and IMS_PER_BATCH = 128, each GPU will
 # contain 16 images per batch

@@ -1,12 +1,77 @@
 import logging
 import os
+import random
 import time
+import numpy as np
 import torch
 import torch.nn as nn
 from utils.meter import AverageMeter
 from utils.metrics import R1_mAP_eval
 from torch import amp
 import torch.distributed as dist
+
+
+def _raw_model(model):
+    return model.module if hasattr(model, 'module') else model
+
+
+def save_resume_state(cfg, model, optimizer, optimizer_center, scheduler, scaler,
+                      epoch, best_map, best_path):
+    """Write a full-restore checkpoint, atomically replacing the previous one."""
+    state = {
+        'epoch': epoch,
+        'model': _raw_model(model).state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'optimizer_center': optimizer_center.state_dict() if optimizer_center is not None else None,
+        'scheduler': scheduler.state_dict() if hasattr(scheduler, 'state_dict') else None,
+        'scaler': scaler.state_dict(),
+        'best_map': best_map,
+        'best_path': best_path,
+        'rng_python': random.getstate(),
+        'rng_numpy': np.random.get_state(),
+        'rng_torch': torch.get_rng_state(),
+        'rng_cuda': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+    path = os.path.join(cfg.OUTPUT_DIR, 'checkpoint_last.pth')
+    tmp_path = path + '.tmp'
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, path)
+
+
+def load_resume_state(path, model, optimizer, optimizer_center, scheduler, scaler, logger):
+    """Restore the state written by save_resume_state; returns (start_epoch, best_map, best_path)."""
+    state = torch.load(path, map_location='cpu', weights_only=False)
+    _raw_model(model).load_state_dict(state['model'])
+    optimizer.load_state_dict(state['optimizer'])
+    if state.get('optimizer_center') is not None and optimizer_center is not None:
+        optimizer_center.load_state_dict(state['optimizer_center'])
+    if state.get('scheduler') is not None and hasattr(scheduler, 'load_state_dict'):
+        scheduler.load_state_dict(state['scheduler'])
+    scaler.load_state_dict(state['scaler'])
+    random.setstate(state['rng_python'])
+    np.random.set_state(state['rng_numpy'])
+    torch.set_rng_state(state['rng_torch'])
+    if torch.cuda.is_available() and state.get('rng_cuda') is not None:
+        torch.cuda.set_rng_state_all(state['rng_cuda'])
+    start_epoch = state['epoch'] + 1
+    best_map = state.get('best_map', 0.0)
+    best_path = state.get('best_path')
+    logger.info('Resumed from {} (finished epoch {}, best mAP {:.5f})'.format(
+        path, state['epoch'], best_map))
+    return start_epoch, best_map, best_path
+
+
+def save_best_model(cfg, model, epoch, mAP, best_path, logger):
+    """Save the new best model and drop the previous best file; returns its path."""
+    new_best = os.path.join(
+        cfg.OUTPUT_DIR,
+        '{}_best_e{:06d}_map{:.5f}.pth'.format(cfg.MODEL.NAME, epoch, mAP))
+    torch.save(_raw_model(model).state_dict(), new_best)
+    if best_path and best_path != new_best and os.path.exists(best_path):
+        os.remove(best_path)
+    logger.info('New best model (mAP {:.5f}) saved to {}'.format(mAP, new_best))
+    return new_best
+
 
 def do_train(cfg,
              model,
@@ -39,8 +104,19 @@ def do_train(cfg,
 
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     scaler = amp.GradScaler('cuda')
+
+    start_epoch = 1
+    best_map = 0.0
+    best_path = None
+    if cfg.SOLVER.RESUME:
+        start_epoch, best_map, best_path = load_resume_state(
+            cfg.SOLVER.RESUME, model, optimizer, optimizer_center, scheduler, scaler, logger)
+        if start_epoch > epochs:
+            logger.info('Nothing to do: resumed epoch {} already reached MAX_EPOCHS {}'.format(
+                start_epoch - 1, epochs))
+
     # train
-    for epoch in range(1, epochs + 1):
+    for epoch in range(start_epoch, epochs + 1):
         start_time = time.time()
         loss_meter.reset()
         acc_meter.reset()
@@ -100,7 +176,9 @@ def do_train(cfg,
             logger.info("Epoch {} done. Time per epoch: {:.3f}[s] Speed: {:.1f}[samples/s]"
                     .format(epoch, time_per_batch * (n_iter + 1), train_loader.batch_size / time_per_batch))
 
-        if epoch % checkpoint_period == 0:
+        # Periodic fixed-epoch checkpoints are disabled when best-model saving
+        # is enabled; the best model and checkpoint_last.pth replace them.
+        if not cfg.SOLVER.SAVE_BEST and epoch % checkpoint_period == 0:
             if cfg.MODEL.DIST_TRAIN:
                 if dist.get_rank() == 0:
                     torch.save(model.state_dict(),
@@ -125,6 +203,9 @@ def do_train(cfg,
                     logger.info("mAP: {:.1%}".format(mAP))
                     for r in [1, 5, 10]:
                         logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+                    if cfg.SOLVER.SAVE_BEST and mAP > best_map:
+                        best_map = mAP
+                        best_path = save_best_model(cfg, model, epoch, mAP, best_path, logger)
                     torch.cuda.empty_cache()
             else:
                 model.eval()
@@ -140,7 +221,14 @@ def do_train(cfg,
                 logger.info("mAP: {:.1%}".format(mAP))
                 for r in [1, 5, 10]:
                     logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
+                if cfg.SOLVER.SAVE_BEST and mAP > best_map:
+                    best_map = mAP
+                    best_path = save_best_model(cfg, model, epoch, mAP, best_path, logger)
                 torch.cuda.empty_cache()
+
+        if not cfg.MODEL.DIST_TRAIN or dist.get_rank() == 0:
+            save_resume_state(cfg, model, optimizer, optimizer_center, scheduler, scaler,
+                              epoch, best_map, best_path)
 
 
 def do_inference(cfg,

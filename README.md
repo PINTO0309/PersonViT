@@ -307,9 +307,36 @@ on top of the heavier backbone.
 
 `run_reid.sh` expects the self-supervised checkpoints at
 `../pretrained/checkpoint0220.pth` (ViT-S) and `../pretrained/checkpoint0260.pth`
-(ViT-B); pass a fourth argument to use another checkpoint. Evaluation runs
-every `SOLVER.EVAL_PERIOD` epochs; to evaluate a finished model use `test.py`
-with the same config and `TEST.WEIGHT logs/<dir>/transformer_60.pth`.
+(ViT-B); pass a fourth argument to use another checkpoint.
+
+### Checkpointing and resume
+
+The `reid` configs enable `SOLVER.SAVE_BEST`. Validation runs every
+`SOLVER.EVAL_PERIOD` (1) epoch, and whenever the validation mAP improves,
+the model is saved as
+
+```
+logs/<dir>/transformer_best_e<epoch:06d>_map<mAP:.5f>.pth   # e.g. transformer_best_e000040_map0.75324.pth
+```
+
+Only the latest best file is kept (the previous best is deleted), and the
+periodic fixed-epoch snapshots (`transformer_<epoch>.pth`) are disabled while
+`SAVE_BEST` is on. Use the best file with `test.py` and `TEST.WEIGHT` to
+evaluate a finished run.
+
+Independently of best saving, the trainer atomically overwrites
+`logs/<dir>/checkpoint_last.pth` at the end of every epoch with a full
+training state: model, optimizers, LR scheduler, AMP scaler, epoch counter,
+best-model bookkeeping, and all RNG states (Python / NumPy / Torch / CUDA).
+Training interrupted for any reason can therefore be resumed exactly, with
+the identical LR schedule and data order, from the next epoch:
+
+```shell
+python train.py --config_file configs/reid/vit_base_8gb.yml \
+  SOLVER.RESUME logs/reid_vit_base_8gb/checkpoint_last.pth \
+  MODEL.DEVICE_ID "('0')" \
+  OUTPUT_DIR logs/reid_vit_base_8gb
+```
 
 A quick pipeline check (dataset statistics, per-batch domain mixture, and a
 few real AMP training steps) is available with:
