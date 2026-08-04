@@ -170,12 +170,12 @@ directly with the matching config from
 ```shell
 cd transreid_pytorch
 python train.py --config_file configs/market/vit_small.yml \
-  DATASETS.ROOT_DIR ./data/ \
-  SOLVER.BASE_LR 4e-4 \
-  MODEL.DEVICE_ID "('0')" \
-  MODEL.PRETRAIN_PATH ../pretrained/vits.lup.256x128.wopt.csk.4-8.ar.375.n8/checkpoint0220.pth \
-  MODEL.PRETRAIN_HW_RATIO 2 \
-  OUTPUT_DIR logs/market.vits.e0220
+DATASETS.ROOT_DIR ./data/ \
+SOLVER.BASE_LR 4e-4 \
+MODEL.DEVICE_ID "('0')" \
+MODEL.PRETRAIN_PATH ../pretrained/vits.lup.256x128.wopt.csk.4-8.ar.375.n8/checkpoint0220.pth \
+MODEL.PRETRAIN_HW_RATIO 2 \
+OUTPUT_DIR logs/market.vits.e0220
 ```
 
 The default solver settings (SGD, base LR `4e-4`, 120 epochs, batch size 64,
