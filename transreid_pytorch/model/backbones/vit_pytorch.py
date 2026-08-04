@@ -354,7 +354,7 @@ class TransReID(nn.Module):
         return x
 
     def load_param(self, model_path,hw_ratio):
-        param_dict = torch.load(model_path, map_location='cpu')
+        param_dict = torch.load(model_path, map_location='cpu', weights_only=False)
         count=0
         if 'model' in param_dict:
             param_dict = param_dict['model']

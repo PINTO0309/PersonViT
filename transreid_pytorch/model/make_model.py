@@ -140,7 +140,7 @@ class Backbone(nn.Module):
                 return global_feat
 
     def load_param(self, trained_path):
-        param_dict = torch.load(trained_path)
+        param_dict = torch.load(trained_path, weights_only=False)
         if 'state_dict' in param_dict:
             param_dict = param_dict['state_dict']
         for i in param_dict:
@@ -251,7 +251,7 @@ class build_transformer(nn.Module):
                 return global_feat
 
     def load_param(self, trained_path):
-        param_dict = torch.load(trained_path, map_location = 'cpu')
+        param_dict = torch.load(trained_path, map_location = 'cpu', weights_only=False)
         for i in param_dict:
             try:
                 self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
@@ -418,7 +418,7 @@ class build_transformer_local(nn.Module):
                     [global_feat, local_feat_1 / 4, local_feat_2 / 4, local_feat_3 / 4, local_feat_4 / 4], dim=1)
 
     def load_param(self, trained_path):
-        param_dict = torch.load(trained_path)
+        param_dict = torch.load(trained_path, weights_only=False)
         for i in param_dict:
             self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
         print('Loading pretrained model from {}'.format(trained_path))

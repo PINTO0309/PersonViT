@@ -1,0 +1,44 @@
+[project]
+name = "personvit"
+version = "1.0.0"
+description = "PersonViT ReID fine-tuning pipeline with the unified reid dataset"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy==2.4.6",
+    "opencv-python==4.13.0.92",
+    "scipy==1.17.1",
+    "timm==1.0.15",
+    "torch==2.11.0+cu128",
+    "torchvision==0.26.0+cu128",
+    "tqdm==4.69.0",
+    "yacs==0.1.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==8.4.2",
+    "ruff==0.15.22",
+]
+export = [
+    "huggingface-hub>=0.34",
+    "onnx==1.22.0",
+    "onnxruntime-gpu==1.26.0",
+    "onnxsim==0.6.5",
+    "onnxslim==0.1.94",
+]
+
+[tool.uv]
+package = false
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }

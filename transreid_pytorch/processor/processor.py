@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 from utils.meter import AverageMeter
 from utils.metrics import R1_mAP_eval
-from torch.cuda import amp
+from torch import amp
 import torch.distributed as dist
 
 def do_train(cfg,
@@ -38,7 +38,7 @@ def do_train(cfg,
     acc_meter = AverageMeter()
 
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
-    scaler = amp.GradScaler()
+    scaler = amp.GradScaler('cuda')
     # train
     for epoch in range(1, epochs + 1):
         start_time = time.time()
@@ -53,7 +53,7 @@ def do_train(cfg,
             target = vid.to(device)
             target_cam = target_cam.to(device)
             target_view = target_view.to(device)
-            with amp.autocast(enabled=True):
+            with amp.autocast('cuda', enabled=True):
                 score, feat = model(img, target, cam_label=target_cam, view_label=target_view )
                 loss = loss_fn(score, feat, target, target_cam)
 

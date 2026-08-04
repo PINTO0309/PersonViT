@@ -118,6 +118,9 @@ _C.DATALOADER.SAMPLER = 'softmax'
 _C.DATALOADER.NUM_INSTANCE = 16
 # remove tail data
 _C.DATALOADER.REMOVE_TAIL = 0
+# Domain smoothing exponent of the domain_balanced_triplet sampler:
+# 1 = proportional to domain size, 0 = uniform across domains
+_C.DATALOADER.DOMAIN_ALPHA = 0.5
 
 # ---------------------------------------------------------------------------- #
 # Solver

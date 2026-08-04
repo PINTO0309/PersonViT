@@ -82,11 +82,221 @@ For a fair deployment comparison:
 
 As a starting point, prefer OSNet x1.0 when latency and memory are the primary constraints, PersonViT-S/16 when a moderate compute budget is available, and PersonViT-B/16 when retrieval accuracy is the priority. The final choice should be based on validation data collected from the actual deployment environment.
 
-## ReID Fine-tuning and  Evaluating
-first download the pretrained models from [ViT-S/16](https://huggingface.co/lakeAGI/PersonViT/tree/main/vits.lup.256x128.wopt.csk.4-8.ar.375.n8) and save it to pretrained
+## ReID Fine-tuning and Evaluating
+
+This repository contains the supervised ReID fine-tuning code
+([`transreid_pytorch`](transreid_pytorch)). The self-supervised pre-training
+code is not included; fine-tuning starts from a released PersonViT checkpoint.
+
+### 1. Install dependencies
+
+The required packages are listed in
+[`transreid_pytorch/setup.py`](transreid_pytorch/setup.py):
+`numpy`, `torch`, `torchvision`, `h5py`, `opencv-python`, `yacs`, and `timm`.
+The pinned versions (`torch==1.6.0`, `timm==0.3.2`) reflect the original
+development environment.
+
+### 2. Download a pre-training checkpoint
+
+Download the self-supervised checkpoints from
+[ViT-S/16](https://huggingface.co/lakeAGI/PersonViT/tree/main/vits.lup.256x128.wopt.csk.4-8.ar.375.n8)
+or
+[ViT-B/16](https://huggingface.co/lakeAGI/PersonViT/tree/main/vitb.lup.256x128.wopt.csk.4-8.ar.375.n8)
+and save them under `pretrained/` in the repository root. The recommended
+checkpoints are `checkpoint0220.pth` for ViT-S/16 and `checkpoint0260.pth` for
+ViT-B/16.
+
+### 3. Prepare the datasets
+
+Place the ReID datasets under `transreid_pytorch/data/`. The directory names
+below are fixed by the dataset loaders in
+[`transreid_pytorch/datasets`](transreid_pytorch/datasets):
+
+```
+transreid_pytorch/data/
+├── market1501/
+│   ├── bounding_box_train/
+│   ├── bounding_box_test/
+│   └── query/
+├── MSMT17/
+│   ├── train/
+│   ├── test/
+│   ├── list_train.txt
+│   ├── list_val.txt
+│   ├── list_query.txt
+│   └── list_gallery.txt
+├── dukemtmcreid/
+│   ├── bounding_box_train/
+│   ├── bounding_box_test/
+│   └── query/
+└── Occluded_Duke/
+    ├── bounding_box_train/
+    ├── bounding_box_test/
+    └── query/
+```
+
+### 4. Fine-tune on all four datasets
+
+[`run_epochs.sh`](transreid_pytorch/run_epochs.sh) resolves the checkpoint file
+from the epoch number and then fine-tunes on MSMT17, Market1501, DukeMTMC-reID,
+and Occluded-Duke sequentially (120 epochs each) via
+[`run_batch.sh`](transreid_pytorch/run_batch.sh):
+
 ```shell
 cd transreid_pytorch
 sh run_epochs.sh ../pretrained/vits.lup.256x128.wopt.csk.4-8.ar.375.n8/ vits.lup.256x128.wopt.csk.4-8.ar.375.n8 220 0 2 small
+```
+
+The positional arguments are:
+
+| # | Argument | Meaning | Example |
+| --- | --- | --- | --- |
+| 1 | `pretrain_dir` | Directory containing the pre-training checkpoints | `../pretrained/vits.lup.256x128.wopt.csk.4-8.ar.375.n8/` |
+| 2 | `output_fix` | Suffix used for the output directories under `logs/` | `vits.lup.256x128.wopt.csk.4-8.ar.375.n8` |
+| 3 | `epoch` | Pre-training epoch; selects `checkpoint<epoch>.pth` (default `240`) | `220` for ViT-S, `260` for ViT-B |
+| 4 | `device` | GPU ID (default `0`) | `0` |
+| 5 | `hw_ratio` | Height/width ratio of the pre-training input (default `2`) | `2` for 256 x 128 |
+| 6 | `arch` | Architecture: `small` or `base` (default `small`) | `small` |
+
+Models and logs are written to `transreid_pytorch/logs/<dataset>.<output_fix>.e<epoch>/`.
+
+### 5. Fine-tune on a single dataset (optional)
+
+To train only one dataset, call [`train.py`](transreid_pytorch/train.py)
+directly with the matching config from
+[`configs/`](transreid_pytorch/configs) (`market`, `msmt17`, `dukemtmc`, or
+`occ_duke`, each with `vit_small.yml` and `vit_base.yml`):
+
+```shell
+cd transreid_pytorch
+python train.py --config_file configs/market/vit_small.yml \
+  DATASETS.ROOT_DIR ./data/ \
+  SOLVER.BASE_LR 4e-4 \
+  MODEL.DEVICE_ID "('0')" \
+  MODEL.PRETRAIN_PATH ../pretrained/vits.lup.256x128.wopt.csk.4-8.ar.375.n8/checkpoint0220.pth \
+  MODEL.PRETRAIN_HW_RATIO 2 \
+  OUTPUT_DIR logs/market.vits.e0220
+```
+
+The default solver settings (SGD, base LR `4e-4`, 120 epochs, batch size 64,
+input 256 x 128) come from the config files and can be overridden on the
+command line in the same `KEY VALUE` style.
+
+### 6. Evaluate a fine-tuned model
+
+Use [`test.py`](transreid_pytorch/test.py) with the same config and the
+fine-tuned weight (either your own `logs/.../transformer_120.pth` or a
+downloaded [PersonViTReID](https://huggingface.co/lakeAGI/PersonViTReID)
+model):
+
+```shell
+cd transreid_pytorch
+python test.py --config_file configs/market/vit_small.yml \
+  DATASETS.ROOT_DIR ./data/ \
+  MODEL.DEVICE_ID "('0')" \
+  TEST.WEIGHT logs/market.vits.e0220/transformer_120.pth \
+  OUTPUT_DIR logs/market.vits.e0220.eval
+```
+
+## Unified `reid` dataset
+
+[`transreid_pytorch/tools/build_unified_dataset.py`](transreid_pytorch/tools/build_unified_dataset.py)
+fully merges the five source ReID datasets placed under
+[`transreid_pytorch/data/`](transreid_pytorch/data) into one training-oriented
+dataset. Generated file names are neutral (`p<pid>_d<dom>_c<cam>_<seq>.jpg`)
+and keep no trace of the source dataset names; sources are only referred to by
+anonymous domain ids `d00`–`d04`:
+
+```
+transreid_pytorch/data/reid/
+├── train/      175,560 images / 7,719 identities (contiguous classifier labels)
+├── query/        4,744 images / 1,362 identities
+└── gallery/     29,942 images (includes gallery-only distractors)
+```
+
+Build (images are hardlinked, so almost no extra disk space is used):
+
+```shell
+cd transreid_pytorch
+python tools/build_unified_dataset.py            # add --force to rebuild
+```
+
+Split policy, following common ReID conventions:
+
+- The split is identity-disjoint: 15% of the identities of each domain are
+  held out for evaluation (`--test-ratio`), stratified per domain so every
+  domain appears in both train and test.
+- For each test identity, one image per camera with two or more images
+  becomes a query and the rest go to the gallery, so every query has a
+  cross-camera match. Single-camera identities become gallery distractors.
+- Global camera ids (33 cameras) keep the standard same-camera filtering
+  valid across the merged evaluation set. Two heavily occluded domains are
+  included; one of them has no camera labels and uses occluded/whole capture
+  setups as two pseudo cameras.
+
+### Domain-balanced sampling
+
+Two of the five domains are small and heavily occluded, so plain PK sampling
+would produce many batches without them. The `domain_balanced_triplet`
+sampler ([`datasets/sampler_domain.py`](transreid_pytorch/datasets/sampler_domain.py))
+draws the P identities of each batch domain-by-domain with probability
+proportional to `(identities per domain) ** DATALOADER.DOMAIN_ALPHA`
+(default 0.5). This keeps every batch mixed across domains — the largest
+domain stops dominating and the small occluded domains appear in nearly every
+batch — without oversampling the small domains as hard as uniform sampling
+would. `DOMAIN_ALPHA 1.0` reproduces plain proportional sampling and `0.0`
+samples domains uniformly.
+
+### Environment (uv)
+
+The pipeline was updated to run on current PyTorch (torch.amp API,
+`torch.load` compatibility, `addmm_` signature). Create the pinned
+environment from [`pyproject.toml`](pyproject.toml) with [uv](https://docs.astral.sh/uv/):
+
+```shell
+uv sync
+source .venv/bin/activate
+```
+
+### Training on the unified dataset
+
+Single-GPU configurations are provided per VRAM budget under
+[`configs/reid/`](transreid_pytorch/configs/reid). All use AMP, SGD with
+cosine schedule, 60 epochs, and K = 4 instances per identity; learning rates
+follow linear scaling from the canonical 4e-4 at batch 64:
+
+| Config | Backbone | Batch (P x K) | Base LR | Warmup | Peak GPU memory |
+| --- | --- | ---: | ---: | ---: | --- |
+| `vit_small_8gb.yml` | ViT-S/16 | 64 (16 x 4) | 4e-4 | 10 | 2.1 GiB (measured) |
+| `vit_base_8gb.yml` | ViT-B/16 | 32 (8 x 4) | 2e-4 | 10 | 2.4 GiB (measured) |
+| `vit_small_16gb.yml` | ViT-S/16 | 128 (32 x 4) | 8e-4 | 10 | ~3.9 GiB (estimated) |
+| `vit_base_16gb.yml` | ViT-B/16 | 64 (16 x 4) | 4e-4 | 10 | ~4.3 GiB (estimated) |
+| `vit_small_96gb.yml` | ViT-S/16 | 256 (64 x 4) | 1.6e-3 | 15 | ~7.6 GiB (estimated) |
+| `vit_base_96gb.yml` | ViT-B/16 | 256 (64 x 4) | 1.6e-3 | 20 | ~17 GiB (estimated) |
+
+Memory numbers are `torch.cuda.max_memory_allocated()` at 256 x 128 input;
+real reserved memory is somewhat higher. Batches beyond 256 are not
+configured on purpose: very large PK batches tend to hurt triplet mining
+quality, so on a 96 GB GPU the remaining headroom is better spent on higher
+input resolution or a larger backbone than on a larger batch.
+
+```shell
+cd transreid_pytorch
+# sh run_reid.sh <arch: small|base> <vram: 8gb|16gb|96gb> [device] [pretrain]
+sh run_reid.sh small 8gb 0
+```
+
+`run_reid.sh` expects the self-supervised checkpoints at
+`../pretrained/checkpoint0220.pth` (ViT-S) and `../pretrained/checkpoint0260.pth`
+(ViT-B); pass a fourth argument to use another checkpoint. Evaluation runs
+every `SOLVER.EVAL_PERIOD` epochs; to evaluate a finished model use `test.py`
+with the same config and `TEST.WEIGHT logs/<dir>/transformer_60.pth`.
+
+A quick pipeline check (dataset statistics, per-batch domain mixture, and a
+few real AMP training steps) is available with:
+
+```shell
+python tools/smoke_reid.py --config configs/reid/vit_small_8gb.yml
 ```
 
 ## ONNX export

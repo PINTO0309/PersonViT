@@ -10,14 +10,17 @@ from .msmt17 import MSMT17
 from .dukemtmcreid import DukeMTMCreID
 from .occ_duke import OCC_DukeMTMCreID
 from .sampler_ddp import RandomIdentitySampler_DDP
+from .sampler_domain import DomainBalancedIdentitySampler
 import torch.distributed as dist
 from .mm import MM
+from .reid import REID
 __factory = {
     'market1501': Market1501,
     'msmt17': MSMT17,
     'dukemtmc': DukeMTMCreID,
     'occ_duke': OCC_DukeMTMCreID,
     'mm': MM,
+    'reid': REID,
 }
 
 def train_collate_fn(batch):
@@ -66,7 +69,18 @@ def make_dataloader(cfg):
     cam_num = dataset.num_train_cams
     view_num = dataset.num_train_vids
 
-    if cfg.DATALOADER.SAMPLER in ['softmax_triplet', 'img_triplet']:
+    if cfg.DATALOADER.SAMPLER == 'domain_balanced_triplet':
+        if cfg.MODEL.DIST_TRAIN:
+            raise NotImplementedError('domain_balanced_triplet supports single-GPU training only')
+        print('using domain_balanced_triplet sampler (alpha={})'.format(cfg.DATALOADER.DOMAIN_ALPHA))
+        train_loader = DataLoader(
+            train_set, batch_size=cfg.SOLVER.IMS_PER_BATCH,
+            sampler=DomainBalancedIdentitySampler(dataset.train, cfg.SOLVER.IMS_PER_BATCH,
+                                                  cfg.DATALOADER.NUM_INSTANCE,
+                                                  cfg.DATALOADER.DOMAIN_ALPHA),
+            num_workers=num_workers, collate_fn=train_collate_fn, pin_memory=True
+        )
+    elif cfg.DATALOADER.SAMPLER in ['softmax_triplet', 'img_triplet']:
         print('using img_triplet sampler')
         if cfg.MODEL.DIST_TRAIN:
             print('DIST_TRAIN START')
