@@ -345,6 +345,44 @@ few real AMP training steps) is available with:
 python tools/smoke_reid.py --config configs/reid/vit_small_8gb.yml
 ```
 
+### Knowledge distillation (teacher -> student)
+
+`configs/reid/vit_small_<vram>_distill.yml` trains a ViT-S/16 student under a
+frozen fine-tuned ViT-B/16 teacher on the unified dataset:
+
+```shell
+cd transreid_pytorch
+python train.py --config_file configs/reid/vit_small_8gb_distill.yml
+```
+
+The teacher is declared purely in the config: `DISTILL.TEACHER_CONFIG` selects
+the teacher architecture (any config file) and `DISTILL.TEACHER_WEIGHT` its
+trained checkpoint (glob patterns such as
+`logs/reid_vit_base_8gb/transformer_best_*.pth` resolve to the single kept
+best file). The teacher runs gradient-free in eval mode — BatchNorm statistics
+are never touched — and adds about 0.5 GiB plus one inference pass per step
+(measured total: 2.54 GiB for the 8 GB config).
+
+Two backbone-agnostic losses are added to the usual softmax + triplet
+objective, so student and teacher embedding dimensions never need to match:
+
+| Loss | Config key | Default | Meaning |
+| --- | --- | ---: | --- |
+| Logit KD | `DISTILL.LOGIT_WEIGHT` | 1.0 | Temperature-scaled KL on the shared 7,719-way identity logits (`DISTILL.TEMPERATURE`, default 4.0) |
+| Relational KD | `DISTILL.REL_WEIGHT` | 30.0 | MSE between the batch cosine-similarity matrices — distills the metric structure retrieval uses |
+| Embedding KD | `DISTILL.EMBED_WEIGHT` | 0.0 | Direct cosine loss; enable only when both embedding dims match |
+
+Because the distillation losses hold no trainable parameters, best-model
+saving, `checkpoint_last.pth` and `SOLVER.RESUME` work unchanged; on resume
+the frozen teacher is simply rebuilt from its config.
+
+To distill into a different (e.g. lighter) student later, register the
+backbone in `model/make_model.py` (`__factory_T_type`), point
+`MODEL.TRANSFORMER_TYPE` at it, and keep the same `DISTILL` block — the
+dimension-agnostic losses require no further changes. Any trained model can
+act as the teacher the same way, including a distilled ViT-S teaching an even
+smaller student.
+
 ## ONNX export
 
 [`export_onnx.py`](export_onnx.py) exports all eight supervised PersonViTReID models (four datasets, each with ViT-S/16 and ViT-B/16) to the [`onnx`](onnx) directory. Missing PyTorch checkpoints are downloaded from the pinned `lakeAGI/PersonViTReID` revision automatically.

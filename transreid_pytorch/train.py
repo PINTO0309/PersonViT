@@ -70,6 +70,15 @@ if __name__ == '__main__':
 
     model = make_model(cfg, num_class=num_classes, camera_num=camera_num, view_num = view_num)
     loss_func, center_criterion = make_loss(cfg, num_classes=num_classes)
+
+    teacher = None
+    if cfg.DISTILL.ENABLED:
+        from model.teacher import build_teacher
+        teacher = build_teacher(cfg, num_classes=num_classes,
+                                camera_num=camera_num, view_num=view_num)
+        logger.info('Distillation enabled: teacher config {} / weight {}'.format(
+            cfg.DISTILL.TEACHER_CONFIG, cfg.DISTILL.TEACHER_WEIGHT))
+
     optimizer, optimizer_center = make_optimizer(cfg, model, center_criterion)
 
     if cfg.SOLVER.WARMUP_METHOD == 'cosine':
@@ -91,7 +100,8 @@ if __name__ == '__main__':
         optimizer_center,
         scheduler,
         loss_func,
-        num_query, args.local_rank
+        num_query, args.local_rank,
+        teacher=teacher
     )
     #  print(cfg.OUTPUT_DIR)
     #  print(cfg.MODEL.PRETRAIN_PATH)

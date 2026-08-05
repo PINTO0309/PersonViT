@@ -79,6 +79,16 @@ def main():
     model.train()
     scaler = amp.GradScaler('cuda')
 
+    teacher, distill_criterion = None, None
+    if cfg.DISTILL.ENABLED:
+        from model.teacher import build_teacher
+        from loss.distill_loss import DistillLoss
+        teacher = build_teacher(cfg, num_classes=num_classes,
+                                camera_num=cam_num, view_num=view_num).to(device)
+        distill_criterion = DistillLoss(cfg.DISTILL.LOGIT_WEIGHT, cfg.DISTILL.REL_WEIGHT,
+                                        cfg.DISTILL.EMBED_WEIGHT, cfg.DISTILL.TEMPERATURE)
+        print('[smoke] distillation enabled (teacher: {})'.format(cfg.DISTILL.TEACHER_CONFIG))
+
     it = iter(train_loader)
     for step in range(args.iters):
         img, vid, target_cam, target_view = next(it)
@@ -89,11 +99,17 @@ def main():
         with amp.autocast('cuda', enabled=True):
             score, feat = model(img, target, cam_label=target_cam, view_label=target_view)
             loss = loss_func(score, feat, target, target_cam)
+            d_msg = ''
+            if distill_criterion is not None:
+                t_score, t_feat = teacher(img, cam_label=target_cam, view_label=target_view)
+                d_loss = distill_criterion(score, feat, t_score, t_feat)
+                loss = loss + d_loss
+                d_msg = f' distill={d_loss.item():.3f}'
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
         torch.cuda.synchronize()
-        print(f'[smoke] step {step}: loss={loss.item():.3f} '
+        print(f'[smoke] step {step}: loss={loss.item():.3f}{d_msg} '
               f'time={time.time() - t0:.2f}s '
               f'peak_mem={torch.cuda.max_memory_allocated() / 1024**3:.2f}GiB')
 

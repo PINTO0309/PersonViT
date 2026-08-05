@@ -122,6 +122,25 @@ _C.DATALOADER.REMOVE_TAIL = 0
 # 1 = proportional to domain size, 0 = uniform across domains
 _C.DATALOADER.DOMAIN_ALPHA = 0.5
 
+# -----------------------------------------------------------------------------
+# Knowledge distillation (teacher -> student)
+# -----------------------------------------------------------------------------
+_C.DISTILL = CN()
+_C.DISTILL.ENABLED = False
+# config file that defines the (frozen) teacher architecture
+_C.DISTILL.TEACHER_CONFIG = ''
+# trained teacher checkpoint; glob patterns are allowed, e.g.
+# logs/reid_vit_base_8gb/transformer_best_*.pth
+_C.DISTILL.TEACHER_WEIGHT = ''
+# temperature-scaled KL divergence on classifier logits
+_C.DISTILL.LOGIT_WEIGHT = 1.0
+# similarity-preserving relational loss on batch cosine-similarity matrices;
+# dimension-agnostic, works for any student backbone
+_C.DISTILL.REL_WEIGHT = 30.0
+# direct cosine embedding loss; requires matching embedding dims (off by default)
+_C.DISTILL.EMBED_WEIGHT = 0.0
+_C.DISTILL.TEMPERATURE = 4.0
+
 # ---------------------------------------------------------------------------- #
 # Solver
 # ---------------------------------------------------------------------------- #

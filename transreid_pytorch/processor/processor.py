@@ -82,7 +82,8 @@ def do_train(cfg,
              optimizer_center,
              scheduler,
              loss_fn,
-             num_query, local_rank):
+             num_query, local_rank,
+             teacher=None):
     log_period = cfg.SOLVER.LOG_PERIOD
     checkpoint_period = cfg.SOLVER.CHECKPOINT_PERIOD
     eval_period = cfg.SOLVER.EVAL_PERIOD
@@ -99,8 +100,19 @@ def do_train(cfg,
             logger.info('Using {} GPUs for training'.format(torch.cuda.device_count()))
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], find_unused_parameters=True)
 
+    distill_criterion = None
+    if teacher is not None:
+        from loss.distill_loss import DistillLoss
+        distill_criterion = DistillLoss(cfg.DISTILL.LOGIT_WEIGHT,
+                                        cfg.DISTILL.REL_WEIGHT,
+                                        cfg.DISTILL.EMBED_WEIGHT,
+                                        cfg.DISTILL.TEMPERATURE)
+        teacher.to(local_rank)
+        teacher.eval()
+
     loss_meter = AverageMeter()
     acc_meter = AverageMeter()
+    distill_meter = AverageMeter()
 
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     scaler = amp.GradScaler('cuda')
@@ -120,6 +132,7 @@ def do_train(cfg,
         start_time = time.time()
         loss_meter.reset()
         acc_meter.reset()
+        distill_meter.reset()
         evaluator.reset()
         model.train()
         for n_iter, (img, vid, target_cam, target_view) in enumerate(train_loader):
@@ -132,6 +145,12 @@ def do_train(cfg,
             with amp.autocast('cuda', enabled=True):
                 score, feat = model(img, target, cam_label=target_cam, view_label=target_view )
                 loss = loss_fn(score, feat, target, target_cam)
+                if distill_criterion is not None:
+                    teacher_score, teacher_feat = teacher(img, cam_label=target_cam,
+                                                          view_label=target_view)
+                    distill_loss = distill_criterion(score, feat, teacher_score, teacher_feat)
+                    distill_meter.update(distill_loss.item(), img.shape[0])
+                    loss = loss + distill_loss
 
             scaler.scale(loss).backward()
 
@@ -152,17 +171,13 @@ def do_train(cfg,
             acc_meter.update(acc, 1)
 
             torch.cuda.synchronize()
-            if cfg.MODEL.DIST_TRAIN:
-                if dist.get_rank() == 0:
-                    if (n_iter + 1) % log_period == 0:
-                        base_lr = scheduler._get_lr(epoch)[0] if cfg.SOLVER.WARMUP_METHOD == 'cosine' else scheduler.get_lr()[0]
-                        logger.info("Epoch[{}] Iter[{}/{}] Loss: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}"
-                                    .format(epoch, (n_iter + 1), len(train_loader), loss_meter.avg, acc_meter.avg, base_lr))
-            else:
-                if (n_iter + 1) % log_period == 0:
-                    base_lr = scheduler._get_lr(epoch)[0] if cfg.SOLVER.WARMUP_METHOD == 'cosine' else scheduler.get_lr()[0]
-                    logger.info("Epoch[{}] Iter[{}/{}] Loss: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}"
-                                .format(epoch, (n_iter + 1), len(train_loader), loss_meter.avg, acc_meter.avg, base_lr))
+            if (n_iter + 1) % log_period == 0 and (not cfg.MODEL.DIST_TRAIN or dist.get_rank() == 0):
+                base_lr = scheduler._get_lr(epoch)[0] if cfg.SOLVER.WARMUP_METHOD == 'cosine' else scheduler.get_lr()[0]
+                msg = "Epoch[{}] Iter[{}/{}] Loss: {:.3f}, Acc: {:.3f}, Base Lr: {:.2e}".format(
+                    epoch, (n_iter + 1), len(train_loader), loss_meter.avg, acc_meter.avg, base_lr)
+                if distill_criterion is not None:
+                    msg += ", Distill: {:.3f}".format(distill_meter.avg)
+                logger.info(msg)
 
         end_time = time.time()
         time_per_batch = (end_time - start_time) / (n_iter + 1)
