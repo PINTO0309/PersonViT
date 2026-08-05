@@ -383,6 +383,29 @@ dimension-agnostic losses require no further changes. Any trained model can
 act as the teacher the same way, including a distilled ViT-S teaching an even
 smaller student.
 
+### Results on the unified test set
+
+Best checkpoints per variant, evaluated on the unified test split (1,362
+identities; 4,744 query / 29,942 gallery images across the five domains; no
+re-ranking). These numbers are not comparable to the single-benchmark tables
+above. All runs: single RTX 3070 (8 GB), AMP, 60 epochs, batch 64, the
+`*_8gb` configs as committed.
+
+| Variant | Backbone | Params | GFLOPs @256x128 | Embedding | Trained by | mAP | Rank-1 | Rank-5 | Rank-10 |
+| --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| B | ViT-B/16 (768 / 12 layers) | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` | **93.3** | **97.1** | **98.2** | 98.4 |
+| S | ViT-S/16 (384 / 12 layers) | 22.0M | 2.94 | 384 | Distillation from B | 92.2 | 96.9 | 98.1 | **98.6** |
+| T | ViT (384 / 6 layers) | 10.9M | ~1.51 | 384 | Distillation from B, initialized by inheriting 6 blocks of the distilled S | (training) | | | |
+
+- Best files: `logs/reid_vit_base_8gb/transformer_best_e000060_map0.93305.pth`
+  and `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`.
+- Wall-clock on the RTX 3070: ~12.9 h (B, ~750 s/epoch), ~8.5 h (S + teacher
+  forward, ~510 s/epoch including per-epoch evaluation).
+- The distilled S keeps within 1.1 mAP / 0.2 Rank-1 of its 4x-larger teacher
+  and slightly beats it at Rank-10.
+- The design of the remaining lightweight tiers (T/N/P/F/A) is documented in
+  [`docs/lightweight_students.md`](docs/lightweight_students.md).
+
 ## ONNX export
 
 [`export_onnx.py`](export_onnx.py) exports all eight supervised PersonViTReID models (four datasets, each with ViT-S/16 and ViT-B/16) to the [`onnx`](onnx) directory. Missing PyTorch checkpoints are downloaded from the pinned `lakeAGI/PersonViTReID` revision automatically.
