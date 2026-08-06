@@ -395,19 +395,29 @@ above. All runs: single RTX 3070 (8 GB), AMP, 60 epochs, batch 64, the
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
 | B | ViT-B/16 (768 / 12 layers) | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` | **93.3** | **97.1** | **98.2** | 98.4 |
 | S | ViT-S/16 (384 / 12 layers) | 22.0M | 2.94 | 384 | Distillation from B | 92.2 | 96.9 | 98.1 | **98.6** |
-| T | ViT (384 / 6 layers) | 10.9M | ~1.51 | 384 | Distillation from B, initialized by inheriting 6 blocks of the distilled S | 88.3 | 94.9 | 97.4 | 98.2 |
+| T-a | ViT (384 / 6 layers) | 10.9M | ~1.48 | 384 | Distillation from B, initialized by inheriting 6 blocks of the distilled S | 88.3 | 94.9 | 97.4 | 98.2 |
+| T-b | ViT (256 / 12 layers) | 9.7M | ~1.35 | 256 | Distillation from B, width-selection init from the distilled S | **89.1** | **95.5** | 97.7 | 98.3 |
+| N | ViT (192 / 12 layers) | 5.5M | ~0.76 | 192 | Distillation from B (80 epochs), DeiT-Tiny ImageNet init | 81.1 | 90.7 | 95.7 | 97.2 |
 
 - Best files: `logs/reid_vit_base_8gb/transformer_best_e000060_map0.93305.pth`,
-  `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`
-  and `logs/reid_vit_t_8gb_distill/transformer_best_e000057_map0.88279.pth`.
+  `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`,
+  `logs/reid_vit_t_8gb_distill/transformer_best_e000057_map0.88279.pth`,
+  `logs/reid_vit_t256_8gb_distill/transformer_best_e000060_map0.89131.pth` and
+  `logs/reid_vit_n_8gb_distill/transformer_best_e000079_map0.81138.pth`.
 - Wall-clock on the RTX 3070: ~12.9 h (B, ~750 s/epoch), ~8.5 h (S + teacher
-  forward), ~6.1 h (T + teacher forward); per-epoch evaluation included.
+  forward), ~6.1 h (T-a), ~6.7 h (T-b), ~9.0 h (N, 80 epochs); per-epoch
+  evaluation included.
 - The distilled S keeps within 1.1 mAP / 0.2 Rank-1 of its 4x-larger teacher
-  and slightly beats it at Rank-10. Tier T (half of S, 1/8 of the teacher)
-  lands 3.9 mAP below S — outside the 1-2 mAP design gate of
-  [`docs/lightweight_students.md`](docs/lightweight_students.md), which lists
-  the planned follow-ups (S-teacher with embedding KD, block-selection and
-  width-vs-depth ablations) before the tier is finalized.
+  and slightly beats it at Rank-10.
+- Width-vs-depth at the T tier: keeping depth 12 (T-b) beats the
+  layer-dropped T-a by 0.8 mAP with fewer parameters and FLOPs, despite T-a
+  starting from a far stronger init (zero-shot 62.5 vs 0.6 mAP after one
+  epoch/at init) — depth matters more than width for this tier. Note that
+  T-b's deeper stack is ~11% slower in measured training step time than T-a
+  at equal batch despite the lower FLOPs; batch-1 inference latency should
+  be measured on the target runtime before the tier is finalized. Both
+  variants remain below the 1-2 mAP gate vs S (T-b: 3.1 mAP) defined in
+  [`docs/lightweight_students.md`](docs/lightweight_students.md).
 - The design of the remaining lightweight tiers (T/N/P/F/A) is documented in
   [`docs/lightweight_students.md`](docs/lightweight_students.md).
 

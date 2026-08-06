@@ -438,6 +438,13 @@ def vit_small_patch16_224_TransReID(img_size=(256, 128), stride_size=16, drop_pa
     model.in_planes = 384
     return model
 
+def vit_t256_patch16_224_TransReID(img_size=(256, 128), stride_size=16, drop_path_rate=0.1, camera=0, view=0, local_feature=False, sie_xishu=1.5, **kwargs):
+    # tier T-b variant: full depth, reduced width (~9.8M); initialized by
+    # width-selection from a trained ViT-S via tools/init_width_select.py
+    model = TransReID(img_size=img_size, patch_size=16, stride_size=stride_size, embed_dim=256, depth=12, num_heads=4, mlp_ratio=4, qkv_bias=True,drop_path_rate=drop_path_rate, camera=camera, view=view, sie_xishu=sie_xishu, local_feature=local_feature,  **kwargs)
+    model.in_planes = 256
+    return model
+
 def vit_t_patch16_224_TransReID(img_size=(256, 128), stride_size=16, drop_path_rate=0.1, camera=0, view=0, local_feature=False, sie_xishu=1.5, **kwargs):
     # layer-dropped ViT-S (tier T): same width, half the depth; initialized by
     # inheriting 6 of the 12 ViT-S blocks via tools/init_layer_drop.py

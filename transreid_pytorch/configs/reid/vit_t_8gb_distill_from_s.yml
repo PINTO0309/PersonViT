@@ -1,0 +1,70 @@
+# Unified reid dataset / distill tier-T student from the distilled ViT-S
+# teacher / 8 GB GPU — teacher-assistant ablation of vit_t_8gb_distill.yml.
+# Teacher capacity gap shrinks from 8x (B) to 2x (S), and because T shares
+# the 384-dim embedding with S, direct embedding KD (EMBED_WEIGHT) is enabled
+# on top of the logit and relational losses.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: '../pretrained/vit_t_init.pth'
+  PRETRAIN_HW_RATIO: 2
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'vit_t_patch16_224_TransReID'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+DISTILL:
+  ENABLED: True
+  TEACHER_CONFIG: 'configs/reid/vit_small_8gb.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_small_8gb_distill/transformer_best_*.pth'
+  LOGIT_WEIGHT: 1.0
+  REL_WEIGHT: 30.0
+  EMBED_WEIGHT: 1.0
+  TEMPERATURE: 4.0
+
+SOLVER:
+  OPTIMIZER_NAME: 'SGD'
+  MAX_EPOCHS: 60
+  BASE_LR: 0.0004
+  WARMUP_EPOCHS: 10
+  IMS_PER_BATCH: 64
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  1e-4
+  WEIGHT_DECAY_BIAS: 1e-4
+  BIAS_LR_FACTOR: 2
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'logs/reid_vit_t_8gb_distill_from_s'

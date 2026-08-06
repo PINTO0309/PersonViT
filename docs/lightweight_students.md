@@ -50,6 +50,20 @@ and model-zoo baselines remain directly usable.
   `blocks.{0,2,4,6,8,11} -> blocks.{0..5}` and writes a T-format checkpoint
   loadable via `MODEL.PRETRAIN_CHOICE: 'self'`.
 
+**Measured outcome (B teacher, 60 epochs, batch 64, RTX 3070):** the
+depth-12 width-ladder variant wins. Layer-dropped `384x6` (above) reached
+88.3 mAP; `256x12` (`vit_t256_patch16_224_TransReID`, width-selection init
+via `tools/init_width_select.py`) reached **89.1 mAP** despite its init
+transferring almost no function (0.6 mAP zero-shot vs the warm layer-drop
+start), crossing the `384x6` curve at epoch 20 — at this tier depth matters
+more than width, and more than init quality. The S-teacher + embedding-KD
+ablation for `384x6` tracked only ~0.3 mAP above its B-teacher baseline
+mid-run and was stopped (resumable state kept in
+`logs/reid_vit_t_8gb_distill_s2b/`). Caveats: `256x12` trains ~11% slower
+per step than `384x6` at equal batch (deeper stack, smaller GEMMs); batch-1
+inference latency is unmeasured; both variants remain below the 1-2 mAP gate
+vs distilled S (best: 3.1 mAP behind).
+
 ## N — DeiT-Tiny-shaped ViT (already implemented)
 
 `D=192, L=12, H=3` (~5.5M) is exactly DeiT-Tiny, and
