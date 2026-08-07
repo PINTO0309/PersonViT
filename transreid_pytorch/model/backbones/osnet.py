@@ -203,6 +203,16 @@ def osnet_x1_0(**kwargs):
     return OSNet(layers=(2, 2, 2), channels=(64, 256, 384, 512), feature_dim=512)
 
 
+def osnet_x1_25(**kwargs):
+    # custom multiplier (no ImageNet zoo weights); init via tools/init_width_expand.py
+    return OSNet(layers=(2, 2, 2), channels=(80, 320, 480, 640), feature_dim=512)
+
+
+def osnet_x1_5(**kwargs):
+    # custom multiplier (no ImageNet zoo weights); init via tools/init_width_expand.py
+    return OSNet(layers=(2, 2, 2), channels=(96, 384, 576, 768), feature_dim=512)
+
+
 def osnet_x0_75(**kwargs):
     return OSNet(layers=(2, 2, 2), channels=(48, 192, 288, 384), feature_dim=512)
 

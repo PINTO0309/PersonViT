@@ -37,6 +37,8 @@ def main():
                     help='batches to inspect for domain mixture')
     ap.add_argument('--no-pretrain', action='store_true',
                     help='skip loading the self-supervised checkpoint')
+    ap.add_argument('opts', nargs=argparse.REMAINDER,
+                    help='extra config overrides in KEY VALUE form')
     args = ap.parse_args()
 
     cfg.merge_from_file(args.config)
@@ -44,6 +46,8 @@ def main():
     if args.no_pretrain:
         overrides += ['MODEL.PRETRAIN_CHOICE', 'none']
     cfg.merge_from_list(overrides)
+    if args.opts:
+        cfg.merge_from_list(args.opts)
     cfg.freeze()
 
     torch.manual_seed(cfg.SOLVER.SEED)
