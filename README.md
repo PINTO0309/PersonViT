@@ -395,9 +395,18 @@ above. All runs: single RTX 3070 (8 GB), AMP, 60 epochs, batch 64, the
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
 | B | ViT-B/16 (768 / 12 layers) | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` | **93.3** | **97.1** | **98.2** | 98.4 |
 | S | ViT-S/16 (384 / 12 layers) | 22.0M | 2.94 | 384 | Distillation from B | 92.2 | 96.9 | 98.1 | **98.6** |
-| T-a | ViT (384 / 6 layers) | 10.9M | ~1.48 | 384 | Distillation from B, initialized by inheriting 6 blocks of the distilled S | 88.3 | 94.9 | 97.4 | 98.2 |
-| T-b | ViT (256 / 12 layers) | 9.7M | ~1.35 | 256 | Distillation from B, width-selection init from the distilled S | **89.1** | **95.5** | 97.7 | 98.3 |
-| N | ViT (192 / 12 layers) | 5.5M | ~0.76 | 192 | Distillation from B (80 epochs), DeiT-Tiny ImageNet init | 81.1 | 90.7 | 95.7 | 97.2 |
+| T-a (retired) | ViT (384 / 6 layers) | 10.9M | ~1.48 | 384 | Distillation from B, initialized by inheriting 6 blocks of the distilled S | 88.3 | 94.9 | 97.4 | 98.2 |
+| T-b (retired) | ViT (256 / 12 layers) | 9.7M | ~1.35 | 256 | Distillation from B, width-selection init from the distilled S | 89.1 | 95.5 | 97.7 | 98.3 |
+| N-ViT (retired) | ViT (192 / 12 layers) | 5.5M | ~0.76 | 192 | Distillation from B (80 epochs), DeiT-Tiny ImageNet init | 81.1 | 90.7 | 95.7 | 97.2 |
+
+The ladder below S has been reassigned to the OSNet family after the
+distilled OSNet x1.0 (2.2M) overtook all three ViT candidates above:
+**T = OSNet x1.5** (4.6M / 2.12 GFLOPs), **N = OSNet x1.25** (3.3M / 1.49
+GFLOPs), P = OSNet x1.0, F = x0.75, A = x0.5. The retired ViT rows are kept
+as the measurement record; see
+[`docs/lightweight_students.md`](docs/lightweight_students.md) for the
+revised design. Results for the new T/N/P tiers are added as their training
+completes.
 
 - Best files: `logs/reid_vit_base_8gb/transformer_best_e000060_map0.93305.pth`,
   `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`,

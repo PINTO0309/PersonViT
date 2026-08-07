@@ -1,12 +1,12 @@
-# Unified reid dataset / distill ViT-B/16 teacher -> OSNet x1_25 student (custom multiplier) / 8 GB GPU
-# OSNet x1_25 (3.3M, 1.49 GFLOPs, feature dim 512), initialized by function-
+# Unified reid dataset / distill ViT-B/16 teacher -> tier-T student (OSNet x1.5) / 8 GB GPU
+# OSNet x1_5 (4.6M, 2.12 GFLOPs, feature dim 512), initialized by function-
 # preserving width expansion of the ImageNet x1.0 weights (tools/init_width_expand.py).
 # CNN tiers use the classic BNNeck CNN
 # recipe: Adam 3.5e-4, flat bias LR, weight decay 5e-4. 100 epochs per the
 # lightweight-students design (smaller tiers benefit from longer schedules).
 MODEL:
   PRETRAIN_CHOICE: 'imagenet'
-  PRETRAIN_PATH: '../pretrained/osnet_x1_25_init.pth'
+  PRETRAIN_PATH: '../pretrained/osnet_x1_5_init.pth'
   PRETRAIN_HW_RATIO: 1
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
@@ -14,7 +14,7 @@ MODEL:
   NAME: 'transformer'
   NO_MARGIN: True
   DEVICE_ID: ('0')
-  TRANSFORMER_TYPE: 'osnet_x1_25'
+  TRANSFORMER_TYPE: 'osnet_x1_5'
   STRIDE_SIZE: [16, 16]
 
 INPUT:
@@ -68,4 +68,4 @@ TEST:
   NECK_FEAT: 'before'
   FEAT_NORM: 'yes'
 
-OUTPUT_DIR: 'logs/reid_osnet_x1_25_8gb_distill'
+OUTPUT_DIR: 'logs/reid_osnet_t_8gb_distill'

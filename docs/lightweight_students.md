@@ -1,31 +1,33 @@
 # Lightweight student backbones: T / N / P / F / A design study
 
-Design study for the lightweight student ladder below ViT-S/16, each tier
-roughly halving the parameters of the previous one, trained by distillation
-on the unified `reid` dataset. Tier letters follow metric prefixes:
-**T**iny, **N**ano, **P**ico, **F**emto, **A**tto. T and N stay Vision
-Transformers; **P and below are CNN students** (decision: pure ViTs are not
-competitive at ≤3M parameters). Implementation is a follow-up task; this
-document fixes architectures, initialization, distillation strategy and
-expected footprints.
+Design study for the lightweight student ladder below ViT-S/16, trained by
+distillation on the unified `reid` dataset. Tier letters follow metric
+prefixes: **T**iny, **N**ano, **P**ico, **F**emto, **A**tto.
 
-## Ladder overview
+## Revision (2026-08-07): the ladder below S is all-OSNet
+
+Measured results overturned the original ViT plan for T and N. The distilled
+OSNet x1.0 (2.2M) surpassed both the 192x12 ViT (81.1 mAP, at 2.5x its size)
+and the 256x12 ViT (89.1 mAP, at 4.4x its size) on the unified test set, so
+the tiers were reassigned:
 
 | Tier | Family | Shape | Params | GFLOPs @256x128 | Embedding dim | Init source |
 | --- | --- | --- | ---: | ---: | ---: | --- |
-| S (existing) | ViT | 384 / 12 layers / 6 heads | 22.0M | 2.94 | 384 | PersonViT checkpoint0220 |
-| **T** | ViT | **384 / 6 layers / 6 heads** | 10.9M | ~1.51 | 384 | **direct layer inheritance from S** |
-| **N** | ViT | 192 / 12 layers / 3 heads | ~5.5M | ~0.74 | 192 | DeiT-Tiny ImageNet (timm) |
+| S (kept) | ViT | 384 / 12 layers / 6 heads | 22.0M | 2.94 | 384 | PersonViT checkpoint0220, distilled from B |
+| **T** | CNN | **OSNet x1.5** (96/384/576/768) | 4.6M | 2.12 | 512 | Function-preserving width expansion (tools/init_width_expand.py) |
+| **N** | CNN | **OSNet x1.25** (80/320/480/640) | 3.3M | 1.49 | 512 | Function-preserving width expansion |
 | **P** | CNN | OSNet x1.0 | 2.2M | 0.98 | 512 | OSNet ImageNet zoo |
 | **F** | CNN | OSNet x0.75 | 1.3M | 0.57 | 512 | OSNet ImageNet zoo |
 | **A** | CNN | OSNet x0.5 | 0.6M | 0.27 | 512 | OSNet ImageNet zoo |
 
-Parameter ratios between neighbours: 22.0 → 10.9 (0.50) → 5.5 (0.50) → 2.2
-(0.40) → 1.3 (0.59) → 0.6 (0.46). The CNN tiers use the standard OSNet width
-multipliers instead of exact halves so that the published ImageNet weights
-and model-zoo baselines remain directly usable.
+The former ViT candidates — N as DeiT-Tiny-shaped 192x12, T-a as
+layer-dropped 384x6, T-b as width-selected 256x12 — are **retired**; their
+sections below are kept as the experimental record that motivated the
+switch. Custom multipliers x1.25/x1.5 have no ImageNet zoo weights and are
+initialized by zero-padded, function-preserving expansion of a trained
+narrower OSNet (ImageNet x1.0 or, preferably, the distilled tier-P model).
 
-## T — layer-dropped ViT-S (requirement: direct weight inheritance from S)
+## [RETIRED] T as layer-dropped ViT-S (measured record)
 
 `D=384, L=6, H=6` — exactly half of S (10.9M) with the same embedding width.
 
@@ -64,7 +66,7 @@ per step than `384x6` at equal batch (deeper stack, smaller GEMMs); batch-1
 inference latency is unmeasured; both variants remain below the 1-2 mAP gate
 vs distilled S (best: 3.1 mAP behind).
 
-## N — DeiT-Tiny-shaped ViT (already implemented)
+## [RETIRED] N as DeiT-Tiny-shaped ViT (measured record)
 
 `D=192, L=12, H=3` (~5.5M) is exactly DeiT-Tiny, and
 `vit_tiny_patch16_224_TransReID` already exists and is registered in
@@ -72,7 +74,7 @@ vs distilled S (best: 3.1 mAP behind).
 existing `PRETRAIN_HW_RATIO` position-embedding resize path. Fallback:
 width-selection from T.
 
-## P / F / A — OSNet CNN students
+## P / F / A — OSNet CNN students (now also T and N via custom multipliers)
 
 Rationale for switching families at ≤3M parameters: pure ViTs at this scale
 historically trail ReID-specialised CNNs (OSNet x1.0: 2.2M / 0.98 GFLOPs is
@@ -104,21 +106,13 @@ with the P/F/A targets while providing ImageNet-pretrained weights per tier.
 
 ## Distillation strategy — teacher-assistant chain
 
-B (86.5M) to A (0.6M) is a 144x capacity gap; plain KD degrades beyond
-roughly 10x. Recommended chain (every arrow is just a `DISTILL` config
-change; any trained student can act as teacher):
-
-```
-B (93.3 mAP) ──> S (running) ──> T ──> N ──> P ──> F ──> A
-           └─ ablations: T and N directly from B; P directly from N vs T
-```
-
-- T: teacher = B (8x, direct) and teacher = S with `EMBED_WEIGHT` enabled —
-  keep the better.
-- N: teacher = T (2x). P: teacher = N (2.5x). F: teacher = P (1.7x).
-  A: teacher = F (2.2x).
-- Direct-from-B ablations are cheap and worth one run per tier down to P;
-  below P the gap (>39x) makes them unpromising.
+B (86.5M) to A (0.6M) is a 144x capacity gap; plain KD was expected to
+degrade beyond roughly 10x, so a teacher-assistant chain was planned.
+**Measured reality: the direct B teacher won every comparison run** — the
+S-teacher ablation for the ViT T tier gained only ~0.3 mAP mid-run, and both
+the 192x12 ViT (15.7x gap) and OSNet x1.0 (39x gap) trained fine directly
+from B. Default: teacher = B for every tier. TA-chain runs (e.g. F from P,
+A from F) remain cheap config-only ablations if a small tier stalls.
 
 ## Training configuration starting points (single GPU, AMP)
 
@@ -129,11 +123,11 @@ for smaller tiers — distillation is the dominant signal.
 
 | Tier | Batch | Base LR | Epochs | Notes |
 | --- | ---: | ---: | ---: | --- |
-| T | 64 | 4e-4 | 60 | SGD, cosine, warmup 10 — same recipe as S |
-| N | 64 | 4e-4 | 80 | |
-| P | 64 | 3.5e-4 | 100 | OSNet convention (Torchreid) prefers slightly lower LR with AMSGrad/SGD; start SGD 3.5e-4 x cosine, ablate 4e-4 |
-| F | 64 | 3.5e-4 | 100 | |
-| A | 64 | 3.5e-4 | 120 | |
+| T (OSNet x1.5) | 64 | 3.5e-4 | 100 | Adam, cosine, warmup 10, wd 5e-4 — classic BNNeck CNN recipe, as validated on P |
+| N (OSNet x1.25) | 64 | 3.5e-4 | 100 | |
+| P (OSNet x1.0) | 64 | 3.5e-4 | 100 | |
+| F (OSNet x0.75) | 64 | 3.5e-4 | 100 | |
+| A (OSNet x0.5) | 64 | 3.5e-4 | 120 | |
 
 On the 96 GB machine, batch 256 / linear-scaled LR applies as for S/B.
 
