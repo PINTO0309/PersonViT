@@ -46,6 +46,10 @@ IMAGE_HEIGHT = 256
 IMAGE_WIDTH = 128
 PATCH_TOKENS = (IMAGE_HEIGHT // 16) * (IMAGE_WIDTH // 16)
 TOKEN_COUNT = PATCH_TOKENS + 1
+# The Gemm-form ViT graph fuses batch and tokens ahead of every linear layer;
+# tensors along that axis carry N*TOKEN_COUNT elements and are canonicalized
+# with this symbol (plain batch axes use "N").
+TOKEN_BATCH_SYMBOL = f"{TOKEN_COUNT}N"
 PIXEL_MEAN = (0.5, 0.5, 0.5)
 PIXEL_STD = (0.5, 0.5, 0.5)
 
@@ -60,6 +64,10 @@ class ReleasedModel:
     output: str
     pretraining_epoch: int
     embedding_dimension: int
+    # "vit" uses the released HF checkpoints and the ViT-specific graph
+    # rewrite; "osnet" uses local unified-dataset checkpoints and the CNN
+    # rewrite path. Both share the fixed-batch-then-rewrite export flow.
+    family: str = "vit"
 
 
 def _released_model(
@@ -113,6 +121,41 @@ RELEASED_MODELS = (
 RELEASED_MODEL_BY_KEY = {model.key: model for model in RELEASED_MODELS}
 
 
+def _unified_osnet_model(tier: str, multiplier_token: str) -> ReleasedModel:
+    """Distilled OSNet tiers trained on the unified `reid` dataset.
+
+    The exported graphs contain no ViT operations (the wrapper exports the
+    OSNet backbone plus L2 normalization only), hence the OSNet-first
+    file naming ``osnet_<multiplier>_<tier>_unified.onnx``.
+    """
+
+    multiplier_name = multiplier_token.replace("_", ".")
+    return ReleasedModel(
+        key=tier,
+        dataset="unified",
+        architecture=f"OSNet {multiplier_name}",
+        config=f"transreid_pytorch/configs/reid/osnet_{tier}_8gb_distill.yml",
+        checkpoint=(
+            f"transreid_pytorch/logs/reid_osnet_{tier}_8gb_distill/"
+            "transformer_best_*.pth"
+        ),
+        output=f"osnet_{multiplier_token}_{tier}_unified.onnx",
+        pretraining_epoch=0,
+        embedding_dimension=512,
+        family="osnet",
+    )
+
+
+UNIFIED_OSNET_MODELS = (
+    _unified_osnet_model("t", "x1_5"),
+    _unified_osnet_model("n", "x1_25"),
+    _unified_osnet_model("p", "x1_0"),
+    _unified_osnet_model("f", "x0_75"),
+    _unified_osnet_model("a", "x0_5"),
+)
+UNIFIED_OSNET_MODEL_BY_KEY = {model.key: model for model in UNIFIED_OSNET_MODELS}
+
+
 class ReIDExportWrapper(nn.Module):
     """Expose the deployment feature and its evaluation-time normalization."""
 
@@ -160,6 +203,16 @@ def resolve_checkpoint(
     cache_dir: Path | None,
     revision: str,
 ) -> Path:
+    if spec.family == "osnet":
+        base = checkpoint_root if checkpoint_root is not None else PROJECT_ROOT
+        matches = sorted(base.glob(spec.checkpoint))
+        if not matches:
+            raise FileNotFoundError(
+                f"No trained checkpoint matches {base / spec.checkpoint}; "
+                f"train tier '{spec.key}' first"
+            )
+        return matches[-1].resolve()
+
     if checkpoint_root is not None:
         path = checkpoint_root / spec.checkpoint
         if not path.is_file():
@@ -233,7 +286,9 @@ def set_model_metadata(
         graph,
         {
             "model_name": spec.key,
-            "source_repository": HF_REPO_ID,
+            "source_repository": (
+                HF_REPO_ID if spec.family == "vit" else "local unified reid training"
+            ),
             "source_checkpoint": spec.checkpoint,
             "checkpoint_file": checkpoint_path.name,
             "dataset": spec.dataset,
@@ -331,7 +386,10 @@ def validate_dynamic_value_info(
         ):
             invalid_values.append(value.name)
         for dimension in tensor_type.shape.dim:
-            if dimension.dim_param and dimension.dim_param != "N":
+            if dimension.dim_param and dimension.dim_param not in (
+                "N",
+                TOKEN_BATCH_SYMBOL,
+            ):
                 invalid_symbols.append((value.name, dimension.dim_param))
     if invalid_values:
         raise RuntimeError(
@@ -393,6 +451,7 @@ def materialize_dynamic_value_info(
         if not unknown_axes:
             continue
 
+        axis_symbols: dict[int, str] = {}
         fixed_shape = fixed_shapes.get(value.name)
         if fixed_shape is not None:
             if len(fixed_shape) != len(observed_shape):
@@ -403,7 +462,12 @@ def materialize_dynamic_value_info(
             for axis, observed_dimension in enumerate(observed_shape):
                 fixed_dimension = fixed_shape[axis]
                 if axis in unknown_axes:
-                    if fixed_dimension != 1:
+                    if fixed_dimension == 1:
+                        axis_symbols[axis] = "N"
+                    elif fixed_dimension == TOKEN_COUNT:
+                        # the Gemm-form token flatten: N*TOKEN_COUNT elements
+                        axis_symbols[axis] = TOKEN_BATCH_SYMBOL
+                    else:
                         raise RuntimeError(
                             f"Cannot prove {value.name} axis {axis} is batch: "
                             f"fixed={fixed_dimension}, dynamic={observed_dimension}"
@@ -421,6 +485,7 @@ def materialize_dynamic_value_info(
                     f"Unexpected dynamic-only CLS multiplier shape: "
                     f"{observed_shape}"
                 )
+            axis_symbols[0] = "N"
         else:
             raise RuntimeError(
                 f"Cannot prove unknown dimensions are batch-derived for "
@@ -428,7 +493,7 @@ def materialize_dynamic_value_info(
             )
 
         for axis in unknown_axes:
-            dimensions[axis].dim_param = "N"
+            dimensions[axis].dim_param = axis_symbols[axis]
             replacement_count += 1
 
     if replacement_count == 0:
@@ -479,6 +544,13 @@ def _node_attribute(node: onnx.NodeProto, name: str) -> Any:
         if attribute.name == name:
             return onnx.helper.get_attribute_value(attribute)
     raise RuntimeError(f"{node.op_type} node has no {name!r} attribute: {node.name}")
+
+
+def _node_attribute_or_default(node: onnx.NodeProto, name: str, default: Any) -> Any:
+    for attribute in node.attribute:
+        if attribute.name == name:
+            return onnx.helper.get_attribute_value(attribute)
+    return default
 
 
 def validate_attention_transposes(
@@ -675,21 +747,68 @@ def _replace_initializer(
     )
 
 
-def _expected_reshape_shape(
-    node: onnx.NodeProto,
+# onnxsim 0.7 rewrites every transformer linear layer into a 2-D Gemm and
+# wraps it with token flattens/unflattens, so the simplified ViT graph holds
+# 73 constant-shape Reshapes: the patch embedding, 36 token flattens, the 12
+# rank-5 qkv splits and 24 token unflattens (identical for ViT-S and ViT-B).
+VIT_EXPECTED_RESHAPE_COUNTS = {
+    "patch_embed": 1,
+    "token_flatten": 36,
+    "qkv": 12,
+    "token_unflatten": 24,
+}
+
+
+def _classify_vit_reshape(
+    current: np.ndarray,
     spec: ReleasedModel,
-    batch_dimension: int,
-) -> np.ndarray:
-    expected_heads = 6 if spec.architecture == "ViT-S/16" else 12
-    if node.name == "/backbone/patch_embed/Reshape":
-        shape = [batch_dimension, spec.embedding_dimension, PATCH_TOKENS]
-    elif node.name.endswith("/attn/Reshape"):
-        shape = [batch_dimension, TOKEN_COUNT, 3, expected_heads, 64]
-    elif node.name.endswith("/attn/Reshape_1"):
-        shape = [batch_dimension, TOKEN_COUNT, spec.embedding_dimension]
-    else:
-        raise RuntimeError(f"Unexpected Reshape node for {spec.key}: {node.name}")
-    return np.asarray(shape, dtype=np.int64)
+    node_name: str,
+) -> tuple[str, np.ndarray, np.ndarray]:
+    """Classify a constant Reshape target of the Gemm-form ViT graph.
+
+    Returns the class name plus the canonical (fixed, dynamic) targets. The
+    token flatten fuses batch and tokens into one leading axis, so its
+    dynamic form keeps ``-1`` (the fused ``N*129`` extent has no constant
+    representation); every other class reserves ``-1`` for the batch axis.
+    """
+
+    heads = 6 if spec.architecture == "ViT-S/16" else 12
+    dim = spec.embedding_dimension
+    values = current.tolist()
+    if (
+        len(values) == 3
+        and values[0] in (1, -1)
+        and values[1] == dim
+        and values[2] in (-1, PATCH_TOKENS)
+    ):
+        return (
+            "patch_embed",
+            np.asarray([1, dim, PATCH_TOKENS], dtype=np.int64),
+            np.asarray([-1, dim, PATCH_TOKENS], dtype=np.int64),
+        )
+    if len(values) == 2 and values[1] == dim and values[0] in (-1, TOKEN_COUNT):
+        return (
+            "token_flatten",
+            np.asarray([TOKEN_COUNT, dim], dtype=np.int64),
+            np.asarray([-1, dim], dtype=np.int64),
+        )
+    if len(values) == 5 and values[1:] == [TOKEN_COUNT, 3, heads, 64] and values[
+        0
+    ] in (1, -1):
+        return (
+            "qkv",
+            np.asarray([1, TOKEN_COUNT, 3, heads, 64], dtype=np.int64),
+            np.asarray([-1, TOKEN_COUNT, 3, heads, 64], dtype=np.int64),
+        )
+    if len(values) == 3 and values[1:] == [TOKEN_COUNT, dim] and values[0] in (1, -1):
+        return (
+            "token_unflatten",
+            np.asarray([1, TOKEN_COUNT, dim], dtype=np.int64),
+            np.asarray([-1, TOKEN_COUNT, dim], dtype=np.int64),
+        )
+    raise RuntimeError(
+        f"Unclassifiable ViT Reshape target for {spec.key} at {node_name}: {values}"
+    )
 
 
 def set_reshape_shapes(
@@ -697,38 +816,42 @@ def set_reshape_shapes(
     spec: ReleasedModel,
     batch_dimension: int,
 ) -> None:
-    """Set explicit static dimensions, reserving -1 for dynamic batch only."""
+    """Set explicit static dimensions, reserving -1 for dynamic axes only.
+
+    In the fixed batch-1 graph every Reshape target is fully explicit. The
+    dynamic graph uses ``-1`` exclusively for the leading axis: the batch for
+    the patch/qkv/unflatten targets and the fused batch-token extent for the
+    Gemm flattens.
+    """
 
     if batch_dimension not in (1, -1):
         raise ValueError(f"Unsupported Reshape batch dimension: {batch_dimension}")
     initializers = _initializer_map(model)
     reshape_nodes = [node for node in model.graph.node if node.op_type == "Reshape"]
-    if len(reshape_nodes) != 25:
-        raise RuntimeError(
-            f"Expected 25 Reshape nodes for {spec.key}, found {len(reshape_nodes)}"
-        )
-
+    class_counts: dict[str, int] = dict.fromkeys(VIT_EXPECTED_RESHAPE_COUNTS, 0)
     expected_by_initializer: dict[str, np.ndarray] = {}
     for node in reshape_nodes:
         shape_name = node.input[1]
         initializer = initializers.get(shape_name)
         if initializer is None:
             raise RuntimeError(f"Reshape shape is not constant: {node.name}")
-        expected = _expected_reshape_shape(node, spec, batch_dimension)
+        current = numpy_helper.to_array(initializer)
+        if current.ndim != 1:
+            raise RuntimeError(f"Unexpected Reshape rank for {node.name}: {current}")
+        klass, fixed, dynamic = _classify_vit_reshape(current, spec, node.name)
+        class_counts[klass] += 1
+        expected = fixed if batch_dimension == 1 else dynamic
         previous = expected_by_initializer.get(shape_name)
         if previous is not None and not np.array_equal(previous, expected):
             raise RuntimeError(
                 f"Reshape initializer {shape_name!r} has conflicting uses"
             )
-        current = numpy_helper.to_array(initializer)
-        if current.ndim != 1 or current.size != expected.size:
-            raise RuntimeError(f"Unexpected Reshape rank for {node.name}: {current}")
         expected_by_initializer[shape_name] = expected
 
-    if len(expected_by_initializer) != 3:
+    if class_counts != VIT_EXPECTED_RESHAPE_COUNTS:
         raise RuntimeError(
-            f"Expected 3 shared Reshape shapes for {spec.key}, "
-            f"found {len(expected_by_initializer)}"
+            f"Unexpected ViT Reshape census for {spec.key}: {class_counts}, "
+            f"expected {VIT_EXPECTED_RESHAPE_COUNTS}"
         )
     for shape_name, expected in expected_by_initializer.items():
         _replace_initializer(initializers[shape_name], expected)
@@ -741,22 +864,17 @@ def validate_reshape_shapes(
 ) -> None:
     """Reject zero dimensions and non-leading inferred Reshape dimensions."""
 
-    expected_batch = -1 if dynamic_batch else 1
     initializers = _initializer_map(model)
     reshape_nodes = [node for node in model.graph.node if node.op_type == "Reshape"]
-    if len(reshape_nodes) != 25:
-        raise RuntimeError(
-            f"Expected 25 Reshape nodes for {spec.key}, found {len(reshape_nodes)}"
-        )
-    shape_names = set()
+    class_counts: dict[str, int] = dict.fromkeys(VIT_EXPECTED_RESHAPE_COUNTS, 0)
     for node in reshape_nodes:
-        shape_name = node.input[1]
-        shape_names.add(shape_name)
-        initializer = initializers.get(shape_name)
+        initializer = initializers.get(node.input[1])
         if initializer is None:
             raise RuntimeError(f"Reshape shape is not constant: {node.name}")
         actual = numpy_helper.to_array(initializer)
-        expected = _expected_reshape_shape(node, spec, expected_batch)
+        klass, fixed, dynamic = _classify_vit_reshape(actual, spec, node.name)
+        class_counts[klass] += 1
+        expected = dynamic if dynamic_batch else fixed
         if not np.array_equal(actual, expected):
             raise RuntimeError(
                 f"Unexpected Reshape shape for {node.name}: "
@@ -770,9 +888,216 @@ def validate_reshape_shapes(
             raise RuntimeError(
                 f"Invalid inferred Reshape axes for {node.name}: {inferred_axes}"
             )
-    if len(shape_names) != 3:
+    if class_counts != VIT_EXPECTED_RESHAPE_COUNTS:
         raise RuntimeError(
-            f"Expected 3 shared Reshape shapes for {spec.key}, found {len(shape_names)}"
+            f"Unexpected ViT Reshape census for {spec.key}: {class_counts}, "
+            f"expected {VIT_EXPECTED_RESHAPE_COUNTS}"
+        )
+
+
+def set_reshape_shapes_osnet(
+    model: onnx.ModelProto,
+    spec: ReleasedModel,
+    batch_dimension: int,
+) -> None:
+    """Rewrite the single OSNet flatten Reshape, reserving -1 for batch only.
+
+    The OSNet graph contains exactly one Reshape: the global-average-pooled
+    feature map flattened to ``[batch, channels]`` before the fc projection.
+    All non-batch dimensions stay explicit; ``-1`` is used exclusively for the
+    leading batch axis of the dynamic model.
+    """
+
+    if batch_dimension not in (1, -1):
+        raise ValueError(f"Unsupported Reshape batch dimension: {batch_dimension}")
+    initializers = _initializer_map(model)
+    reshape_nodes = [node for node in model.graph.node if node.op_type == "Reshape"]
+    if len(reshape_nodes) != 1:
+        raise RuntimeError(
+            f"Expected 1 flatten Reshape for {spec.key}, found {len(reshape_nodes)}"
+        )
+    node = reshape_nodes[0]
+    initializer = initializers.get(node.input[1])
+    if initializer is None:
+        raise RuntimeError(f"Reshape shape is not constant: {node.name}")
+    current = numpy_helper.to_array(initializer)
+    if current.ndim != 1 or current.size != 2:
+        raise RuntimeError(f"Unexpected flatten Reshape rank for {node.name}: {current}")
+    channels = int(current[1])
+    if channels <= 0:
+        # The tracer emits [1, -1]; make the channel count explicit from the
+        # fc Gemm weight so -1 stays reserved for the batch axis only.
+        gemm_nodes = [n for n in model.graph.node if n.op_type == "Gemm"]
+        if len(gemm_nodes) != 1 or gemm_nodes[0].input[0] != node.output[0]:
+            raise RuntimeError(
+                f"Cannot locate the fc Gemm fed by {node.name} for {spec.key}"
+            )
+        weight = initializers.get(gemm_nodes[0].input[1])
+        if weight is None:
+            raise RuntimeError(f"fc Gemm weight is not constant for {spec.key}")
+        trans_b = _node_attribute_or_default(gemm_nodes[0], "transB", 0)
+        channels = int(weight.dims[1] if trans_b else weight.dims[0])
+    if channels <= 0:
+        raise RuntimeError(
+            f"Cannot determine the flatten channel count for {node.name}"
+        )
+    _replace_initializer(
+        initializer,
+        np.asarray([batch_dimension, channels], dtype=np.int64),
+    )
+
+
+def validate_reshape_shapes_osnet(
+    model: onnx.ModelProto,
+    spec: ReleasedModel,
+    dynamic_batch: bool,
+) -> None:
+    """Reject zero/non-leading inferred dimensions in the flatten Reshape."""
+
+    expected_batch = -1 if dynamic_batch else 1
+    initializers = _initializer_map(model)
+    reshape_nodes = [node for node in model.graph.node if node.op_type == "Reshape"]
+    if len(reshape_nodes) != 1:
+        raise RuntimeError(
+            f"Expected 1 flatten Reshape for {spec.key}, found {len(reshape_nodes)}"
+        )
+    node = reshape_nodes[0]
+    initializer = initializers.get(node.input[1])
+    if initializer is None:
+        raise RuntimeError(f"Reshape shape is not constant: {node.name}")
+    actual = numpy_helper.to_array(initializer)
+    if actual.ndim != 1 or actual.size != 2:
+        raise RuntimeError(f"Unexpected flatten Reshape rank for {node.name}: {actual}")
+    if np.any(actual == 0):
+        raise RuntimeError(f"Reshape shape contains 0 for {node.name}")
+    if int(actual[0]) != expected_batch or int(actual[1]) <= 0:
+        raise RuntimeError(
+            f"Unexpected flatten Reshape shape for {node.name}: {actual.tolist()}, "
+            f"expected [{expected_batch}, <channels>]"
+        )
+
+
+def fold_osnet_batchnorm(model: onnx.ModelProto, spec: ReleasedModel) -> None:
+    """Fold every remaining BatchNormalization into its producing Gemm.
+
+    Inference-time BatchNorm is the exact per-channel affine transform
+    ``y = a*x + b`` with ``a = gamma / sqrt(var + eps)`` and
+    ``b = beta - a * mean``. onnxsim fuses Conv+BN pairs but leaves the fc
+    ``Gemm -> BatchNormalization`` pair; the affine constants fold into the
+    Gemm weights (``W' = diag(a) @ W`` for ``transB=1``) and bias
+    (``c' = a*c + b``), removing the node without approximation.
+    """
+
+    initializers = _initializer_map(model)
+    producers = {output: node for node in model.graph.node for output in node.output}
+    consumers: dict[str, list[onnx.NodeProto]] = {}
+    for node in model.graph.node:
+        for name in node.input:
+            consumers.setdefault(name, []).append(node)
+
+    batchnorm_nodes = [
+        node for node in model.graph.node if node.op_type == "BatchNormalization"
+    ]
+    for node in batchnorm_nodes:
+        gemm = producers.get(node.input[0])
+        if gemm is None or gemm.op_type != "Gemm":
+            raise RuntimeError(
+                f"BatchNormalization {node.name} is not fed by a Gemm for {spec.key}"
+            )
+        if len(consumers.get(gemm.output[0], [])) != 1:
+            raise RuntimeError(
+                f"Gemm output has multiple consumers; cannot fold {node.name}"
+            )
+        if _node_attribute_or_default(gemm, "alpha", 1.0) != 1.0 or (
+            _node_attribute_or_default(gemm, "beta", 1.0) != 1.0
+        ) or _node_attribute_or_default(gemm, "transA", 0) != 0:
+            raise RuntimeError(f"Unsupported Gemm attributes for {node.name}")
+
+        tensors = []
+        for name in (*node.input[1:], gemm.input[1]):
+            initializer = initializers.get(name)
+            if initializer is None:
+                raise RuntimeError(
+                    f"Non-constant BatchNormalization/Gemm input for {node.name}"
+                )
+            tensors.append(numpy_helper.to_array(initializer).astype(np.float64))
+        gamma, beta, mean, variance, weight = tensors
+        epsilon = _node_attribute_or_default(node, "epsilon", 1e-5)
+        scale = gamma / np.sqrt(variance + epsilon)
+        shift = beta - scale * mean
+
+        trans_b = _node_attribute_or_default(gemm, "transB", 0)
+        fused_weight = (
+            weight * scale[:, None] if trans_b else weight * scale[None, :]
+        )
+        if len(gemm.input) > 2:
+            bias_initializer = initializers.get(gemm.input[2])
+            if bias_initializer is None:
+                raise RuntimeError(f"Non-constant Gemm bias for {node.name}")
+            bias = numpy_helper.to_array(bias_initializer).astype(np.float64)
+            fused_bias = scale * bias + shift
+            _replace_initializer(bias_initializer, fused_bias.astype(np.float32))
+        else:
+            bias_name = f"{gemm.name}/folded_bn_bias"
+            model.graph.initializer.append(
+                numpy_helper.from_array(shift.astype(np.float32), name=bias_name)
+            )
+            gemm.input.append(bias_name)
+        _replace_initializer(
+            initializers[gemm.input[1]], fused_weight.astype(np.float32)
+        )
+
+        gemm.output[0] = node.output[0]
+        model.graph.node.remove(node)
+
+    _remove_unused_initializers(model)
+    onnx.checker.check_model(model)
+
+
+def validate_osnet_structure(
+    model: onnx.ModelProto,
+    spec: ReleasedModel,
+) -> None:
+    """Validate the pure-CNN topology of an exported OSNet graph.
+
+    No ViT operations may appear: any rank-5 Transpose (the attention qkv
+    signature) is rejected. The graph must keep exactly one flatten Reshape
+    and one Gemm (the fc projection with its BatchNorm folded), contain the
+    channel-gate/global poolings, and branch the public input into a single
+    stem Conv.
+    """
+
+    for node in model.graph.node:
+        if node.op_type == "BatchNormalization":
+            raise RuntimeError(
+                f"Unfolded BatchNormalization remains for {spec.key}: {node.name}"
+            )
+        if node.op_type != "Transpose":
+            continue
+        if len(_transpose_permutation(node)) >= 5:
+            raise RuntimeError(
+                f"Unexpected rank-5 Transpose in OSNet graph for {spec.key}: "
+                f"{node.name}"
+            )
+
+    gemm_nodes = [node for node in model.graph.node if node.op_type == "Gemm"]
+    if len(gemm_nodes) != 1:
+        raise RuntimeError(
+            f"Expected 1 fc Gemm for {spec.key}, found {len(gemm_nodes)}"
+        )
+    pool_nodes = [
+        node for node in model.graph.node if node.op_type == "GlobalAveragePool"
+    ]
+    if not pool_nodes:
+        raise RuntimeError(f"Missing GlobalAveragePool nodes for {spec.key}")
+
+    direct_image_consumers = [
+        node for node in model.graph.node if "images" in node.input
+    ]
+    if len(direct_image_consumers) != 1 or direct_image_consumers[0].op_type != "Conv":
+        raise RuntimeError(
+            f"Unexpected operations branched from the model input for {spec.key}: "
+            f"{[(node.name, node.op_type) for node in direct_image_consumers]}"
         )
 
 
@@ -795,6 +1120,24 @@ def _remove_unused_initializers(model: onnx.ModelProto) -> None:
     model.graph.initializer.extend(retained)
 
 
+def _finish_dynamic_rewrite(model: onnx.ModelProto, spec: ReleasedModel) -> None:
+    """Drop the fixed-batch Expand feeding the L2-normalization Div.
+
+    ``[N, D] / [N, 1]`` broadcasts directly; removing the batch-1 Expand
+    avoids constructing another runtime batch shape for the normalization.
+    """
+
+    producers = {output: node for node in model.graph.node for output in node.output}
+    output_producer = producers.get(model.graph.output[0].name)
+    if output_producer is None or output_producer.op_type != "Div":
+        raise RuntimeError(f"Cannot find output Div for {spec.key}")
+    norm_expand = producers.get(output_producer.input[1])
+    if norm_expand is None or norm_expand.op_type != "Expand":
+        raise RuntimeError(f"Cannot find output normalization Expand for {spec.key}")
+    output_producer.input[1] = norm_expand.input[0]
+    model.graph.node.remove(norm_expand)
+
+
 def convert_fixed_batch_to_n(
     fixed_path: Path,
     output_path: Path,
@@ -804,8 +1147,12 @@ def convert_fixed_batch_to_n(
 
     model = onnx.load(str(fixed_path))
     onnx.checker.check_model(model)
-    validate_reshape_shapes(model, spec, dynamic_batch=False)
-    validate_attention_transposes(model, spec, batch_dimension=1)
+    if spec.family == "vit":
+        validate_reshape_shapes(model, spec, dynamic_batch=False)
+        validate_attention_transposes(model, spec, batch_dimension=1)
+    else:
+        validate_reshape_shapes_osnet(model, spec, dynamic_batch=False)
+        validate_osnet_structure(model, spec)
     if len(model.graph.input) != 1 or len(model.graph.output) != 1:
         raise RuntimeError(f"Expected one ONNX input and output for {spec.key}")
     if model.graph.input[0].name != "images":
@@ -819,6 +1166,26 @@ def convert_fixed_batch_to_n(
 
     # All non-batch dimensions are known.  Reserve -1 exclusively for the
     # leading dynamic batch axis; zero-copy Reshape dimensions are forbidden.
+    if spec.family == "osnet":
+        set_reshape_shapes_osnet(model, spec, batch_dimension=-1)
+        _finish_dynamic_rewrite(model, spec)
+        del model.graph.value_info[:]
+        metadata = {item.key: item.value for item in model.metadata_props}
+        metadata["input_batch"] = "N"
+        onnx.helper.set_model_props(model, metadata)
+        _remove_unused_initializers(model)
+        model = shape_inference.infer_shapes(
+            model,
+            strict_mode=True,
+            data_prop=True,
+        )
+        validate_reshape_shapes_osnet(model, spec, dynamic_batch=True)
+        validate_osnet_structure(model, spec)
+        onnx.checker.check_model(model)
+        onnx.save(model, str(output_path))
+        onnx.checker.check_model(str(output_path))
+        return
+
     set_reshape_shapes(model, spec, batch_dimension=-1)
 
     # onnxsim folds cls_token.expand(batch, -1, -1) into a batch-1 initializer.
@@ -891,17 +1258,7 @@ def convert_fixed_batch_to_n(
     for offset, node in enumerate(dynamic_nodes):
         model.graph.node.insert(backbone_concat_index + offset, node)
 
-    # [N, D] / [N, 1] broadcasts directly.  Removing the fixed [1, D] Expand
-    # avoids constructing another runtime batch shape for L2 normalization.
-    producers = {output: node for node in model.graph.node for output in node.output}
-    output_producer = producers.get(model.graph.output[0].name)
-    if output_producer is None or output_producer.op_type != "Div":
-        raise RuntimeError(f"Cannot find output Div for {spec.key}")
-    norm_expand = producers.get(output_producer.input[1])
-    if norm_expand is None or norm_expand.op_type != "Expand":
-        raise RuntimeError(f"Cannot find output normalization Expand for {spec.key}")
-    output_producer.input[1] = norm_expand.input[0]
-    model.graph.node.remove(norm_expand)
+    _finish_dynamic_rewrite(model, spec)
 
     del model.graph.value_info[:]
     metadata = {item.key: item.value for item in model.metadata_props}
@@ -979,15 +1336,21 @@ def validate_graph(
             f"Unexpected embedding dimension for {spec.key}: "
             f"{output_dimensions[1].dim_value}"
         )
-    validate_reshape_shapes(graph, spec, dynamic_batch=dynamic_batch)
-    validate_attention_transposes(
-        graph,
-        spec,
-        batch_dimension="N" if dynamic_batch else 1,
-    )
-    if dynamic_batch:
-        validate_dynamic_value_info(graph, spec)
-        validate_dynamic_cls_broadcast(graph, spec)
+    if spec.family == "vit":
+        validate_reshape_shapes(graph, spec, dynamic_batch=dynamic_batch)
+        validate_attention_transposes(
+            graph,
+            spec,
+            batch_dimension="N" if dynamic_batch else 1,
+        )
+        if dynamic_batch:
+            validate_dynamic_value_info(graph, spec)
+            validate_dynamic_cls_broadcast(graph, spec)
+    else:
+        validate_reshape_shapes_osnet(graph, spec, dynamic_batch=dynamic_batch)
+        validate_osnet_structure(graph, spec)
+        if dynamic_batch:
+            validate_dynamic_value_info(graph, spec)
 
 
 def verify_with_onnxruntime(
@@ -1108,7 +1471,11 @@ def export_model(
 
             onnx.checker.check_model(str(temporary_path))
             graph = simplify_graph(onnx.load(str(temporary_path)), spec)
-            set_reshape_shapes(graph, spec, batch_dimension=1)
+            if spec.family == "vit":
+                set_reshape_shapes(graph, spec, batch_dimension=1)
+            else:
+                fold_osnet_batchnorm(graph, spec)
+                set_reshape_shapes_osnet(graph, spec, batch_dimension=1)
             set_model_metadata(
                 graph,
                 spec,
@@ -1219,9 +1586,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--models",
         nargs="+",
-        choices=["all", *RELEASED_MODEL_BY_KEY],
+        choices=[
+            "all",
+            "unified",
+            *RELEASED_MODEL_BY_KEY,
+            *UNIFIED_OSNET_MODEL_BY_KEY,
+        ],
         default=["all"],
-        help="released model keys to export; defaults to all eight models",
+        help=(
+            "model keys to export; 'all' selects the eight released ViT models, "
+            "'unified' selects every unified-dataset OSNet tier with a trained "
+            "checkpoint, and t/n/p/f/a select individual OSNet tiers"
+        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -1259,8 +1635,23 @@ def main() -> None:
         if len(args.models) != 1:
             raise ValueError("'all' cannot be combined with individual model keys")
         selected_models = RELEASED_MODELS
+    elif "unified" in args.models:
+        if len(args.models) != 1:
+            raise ValueError("'unified' cannot be combined with individual model keys")
+        available = []
+        for spec in UNIFIED_OSNET_MODELS:
+            try:
+                resolve_checkpoint(spec, args.checkpoint_root, None, args.revision)
+            except FileNotFoundError:
+                print(f"[skip missing] tier '{spec.key}' has no trained checkpoint")
+                continue
+            available.append(spec)
+        if not available:
+            raise FileNotFoundError("No trained unified OSNet checkpoints were found")
+        selected_models = tuple(available)
     else:
-        selected_models = tuple(RELEASED_MODEL_BY_KEY[key] for key in args.models)
+        combined = {**RELEASED_MODEL_BY_KEY, **UNIFIED_OSNET_MODEL_BY_KEY}
+        selected_models = tuple(combined[key] for key in args.models)
 
     args.output_dir = args.output_dir.resolve()
     if args.checkpoint_root is not None:

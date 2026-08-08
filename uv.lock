@@ -512,17 +512,17 @@ wheels = [
 
 [[package]]
 name = "onnxsim"
-version = "0.6.5"
+version = "0.7.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "onnx", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
     { name = "rich", marker = "platform_machine == 'x86_64' and sys_platform == 'linux'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c1/ac/8b1635f72adafc2be084bae43dc7a5043424eced4587a341430d7213dd32/onnxsim-0.6.5.tar.gz", hash = "sha256:ae63902477793c3d160fc8dcc796cfd041c38e72f1fb74358a0cbd85bc3e777f", size = 2730302, upload-time = "2026-06-08T11:33:40.597Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/c1/c6/b396a0cf4d00d358c9d4a695a9613bcb5573a3ee83941c9a992056092d46/onnxsim-0.7.1.tar.gz", hash = "sha256:33950319f774dc4636d615a6316863b0bf42095e91a5ec111557e22e216f359a", size = 3213141, upload-time = "2026-08-08T12:11:26.927Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/e1/e5/3fe3becdaabeaaf38525c79cb2170a5a356a4555c4c7e4f621608262b2a2/onnxsim-0.6.5-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:4fbfd08d09c9be8b5066358b3705a7dc8df68904ba4a629a77bb20beb6d09bcc", size = 2942368, upload-time = "2026-06-08T11:33:27.108Z" },
-    { url = "https://files.pythonhosted.org/packages/01/82/6ea262bb9500a30b54181946ec0ce093530895afacb66ac6b86688713dff/onnxsim-0.6.5-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bc7c2717c0bc0ffa21e501c675af520f344e70f2bfda835e8fefa127ffd6ac92", size = 2937976, upload-time = "2026-06-08T11:33:34.72Z" },
-    { url = "https://files.pythonhosted.org/packages/5b/60/cb6923cded2b7933a8ae171bbc377f87dc1203464c0fd9f006ffe61857ac/onnxsim-0.6.5-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:30025eaed4c5262fb0f2e2faec911c4693029e89104b7595fb207bf6f6c9471d", size = 2943591, upload-time = "2026-06-08T11:33:38.203Z" },
+    { url = "https://files.pythonhosted.org/packages/f5/3e/85f23113b4ba5f73ac10413f91a4a22e3cba6f91443c4b3554448c2260c3/onnxsim-0.7.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bf6c78ec5b35b13e8d5fd5095a207c23db1855ea2c1b2355e4fcd61848b04402", size = 3164781, upload-time = "2026-08-08T12:11:14.18Z" },
+    { url = "https://files.pythonhosted.org/packages/43/68/5af6b0a8e57806197a8fc50ebe6ab16f216566540e7f1236205f43473795/onnxsim-0.7.1-cp312-abi3-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:19e5bb429e0a5320aed3618038ed0d51c3967597bf4b1f4d7d2ae1ab141624c9", size = 3162017, upload-time = "2026-08-08T12:11:21.73Z" },
+    { url = "https://files.pythonhosted.org/packages/69/a8/1671cca6ee7baae0083851780c861d04b75d9bcbc54fe81b2f05f1ce615f/onnxsim-0.7.1-cp314-cp314t-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:53b3f79bdd27133a7299e2ef1d3f327db114250eff04b6c6d8aa3d643b1adae3", size = 3165146, upload-time = "2026-08-08T12:11:25.329Z" },
 ]
 
 [[package]]
@@ -596,7 +596,7 @@ requires-dist = [
     { name = "numpy", specifier = "==2.4.6" },
     { name = "onnx", marker = "extra == 'export'", specifier = "==1.22.0" },
     { name = "onnxruntime-gpu", marker = "extra == 'export'", specifier = "==1.26.0" },
-    { name = "onnxsim", marker = "extra == 'export'", specifier = "==0.6.5" },
+    { name = "onnxsim", marker = "extra == 'export'", specifier = "==0.7.1" },
     { name = "onnxslim", marker = "extra == 'export'", specifier = "==0.1.94" },
     { name = "opencv-python", specifier = "==4.13.0.92" },
     { name = "pytest", marker = "extra == 'dev'", specifier = "==8.4.2" },

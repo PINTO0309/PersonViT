@@ -24,7 +24,7 @@ export = [
     "huggingface-hub>=0.34",
     "onnx==1.22.0",
     "onnxruntime-gpu==1.26.0",
-    "onnxsim==0.6.5",
+    "onnxsim==0.7.1",
     "onnxslim==0.1.94",
 ]
 

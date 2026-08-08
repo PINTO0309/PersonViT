@@ -458,13 +458,52 @@ python export_onnx.py --models market-vits16 msmt-vitb16
 python export_onnx.py --force
 ```
 
+### Unified-dataset OSNet tiers
+
+The distilled OSNet tiers trained on the unified `reid` dataset export
+through the same fixed-batch-then-rewrite pipeline with a CNN-specific
+rewrite path (the single flatten `Reshape` gets an explicit channel count
+and `-1` only for the dynamic batch axis; the ViT attention/CLS validation
+is replaced by pure-CNN structural checks). The one `BatchNormalization`
+that onnxsim leaves behind — the fc `Gemm -> BatchNorm1d` pair — is folded
+into the Gemm as an exact per-channel affine transform, so the exported
+OSNet graphs contain no BatchNormalization nodes at all (enforced by the
+structural validation). The exported graphs contain no
+ViT operations — the checkpoint's BNNeck and classifier are dropped and only
+the OSNet backbone plus L2 normalization remains — hence the OSNet-first
+file naming:
+
+| Tier | Backbone | Fixed model | Embedding |
+| --- | --- | --- | ---: |
+| T | OSNet x1.5 | `osnet_x1_5_t_unified.onnx` | 512 |
+| N | OSNet x1.25 | `osnet_x1_25_n_unified.onnx` | 512 |
+| P | OSNet x1.0 | `osnet_x1_0_p_unified.onnx` | 512 |
+| F | OSNet x0.75 | `osnet_x0_75_f_unified.onnx` | 512 |
+| A | OSNet x0.5 | `osnet_x0_5_a_unified.onnx` | 512 |
+
+Each fixed model is again paired with a dynamic-batch `*_n.onnx`. The
+input interface and preprocessing are identical to the released models
+(`[N, 3, 256, 128]`, mean/std 0.5); outputs are L2-normalized 512-dim
+embeddings. Checkpoints resolve locally from
+`transreid_pytorch/logs/reid_osnet_<tier>_8gb_distill/transformer_best_*.pth`:
+
+```shell
+python export_onnx.py --models unified      # every tier with a trained checkpoint
+python export_onnx.py --models p n          # individual tiers
+```
+
 For every checkpoint, the exporter first creates and validates the fixed batch-1
 model. It then derives the `_n.onnx` graph from that model. Every `Reshape`
-target explicitly specifies all non-batch dimensions. Fixed models use `1` for
-the leading batch dimension; `_n.onnx` models use `-1` only for that leading
-dimension. Zero-copy dimensions are not used, and `-1` is never used for a
-non-batch dimension. For example, the ViT-S/16 patch embedding target is
-`[1, 384, 128]` in the fixed model and `[-1, 384, 128]` in the dynamic model.
+target explicitly specifies all non-batch dimensions; zero-copy dimensions are
+not used and `-1` appears only on the leading axis of dynamic targets. onnxsim
+(0.7) rewrites each transformer linear layer into a 2-D `Gemm`, so the ViT
+graphs carry four validated `Reshape` classes (patch embedding, 36 token
+flattens, 12 rank-5 qkv splits, 24 token unflattens). The token flattens fuse
+batch and tokens into one leading axis whose extent is `N*129`; fixed models
+pin it to `129`, `_n.onnx` models keep `-1` there and annotate the inferred
+tensors with the `129N` symbol (plain batch axes use `N`). For example, the
+ViT-S/16 patch embedding target is `[1, 384, 128]` in the fixed model and
+`[-1, 384, 128]` in the dynamic model.
 
 At `/backbone/Concat`, the symbolic batch size is derived locally from the
 adjacent patch embeddings. An all-1.0 tensor with shape `[N, 1, 1]` is
