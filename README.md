@@ -214,13 +214,6 @@ transreid_pytorch/data/reid/
 └── gallery/     29,942 images (includes gallery-only distractors)
 ```
 
-Build (images are hardlinked, so almost no extra disk space is used):
-
-```shell
-cd transreid_pytorch
-python tools/build_unified_dataset.py            # add --force to rebuild
-```
-
 Split policy, following common ReID conventions:
 
 - The split is identity-disjoint: 15% of the identities of each domain are
