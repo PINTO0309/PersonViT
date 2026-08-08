@@ -229,10 +229,6 @@ Split policy, following common ReID conventions:
 - For each test identity, one image per camera with two or more images
   becomes a query and the rest go to the gallery, so every query has a
   cross-camera match. Single-camera identities become gallery distractors.
-- Global camera ids (33 cameras) keep the standard same-camera filtering
-  valid across the merged evaluation set. Two heavily occluded domains are
-  included; one of them has no camera labels and uses occluded/whole capture
-  setups as two pseudo cameras.
 
 ### Domain-balanced sampling
 
