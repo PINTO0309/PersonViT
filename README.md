@@ -384,6 +384,7 @@ as committed.
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
 | B | ViT-B/16 (768 / 12 layers) | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` (60 epochs) | **93.3** | **97.1** | **98.2** | 98.4 |
 | S | ViT-S/16 (384 / 12 layers) | 22.0M | 2.94 | 384 | Distillation from B (60 epochs) | 92.2 | 96.9 | 98.1 | **98.6** |
+| **N** | OSNet x1.25 | 3.3M | 1.49 | 512 | Distillation from B (100 epochs, Adam 3.5e-4), function-preserving expansion of the distilled P | 90.6 | 96.0 | 97.9 | 98.4 |
 | **P** | OSNet x1.0 | 2.2M | 0.98 | 512 | Distillation from B (100 epochs, Adam 3.5e-4), OSNet ImageNet init | 90.0 | 96.1 | 97.8 | 98.4 |
 
 The ladder below S is the OSNet family: **T = OSNet x1.5** (4.6M / 2.12
@@ -394,13 +395,18 @@ results are recorded in
 [`docs/lightweight_students.md`](docs/lightweight_students.md).
 
 - Best files: `logs/reid_vit_base_8gb/transformer_best_e000060_map0.93305.pth`,
-  `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`
+  `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`,
+  `logs/reid_osnet_n_8gb_distill/transformer_best_e000099_map0.90604.pth`
   and `logs/reid_osnet_p_8gb_distill/transformer_best_e000099_map0.90048.pth`.
 - Wall-clock on the RTX 3070: ~12.9 h (B, ~750 s/epoch), ~8.5 h (S + teacher
-  forward), ~15.5 h (P, 100 epochs); per-epoch evaluation included.
+  forward), ~15.5 h (P, 100 epochs), ~18 h (N, 100 epochs); per-epoch
+  evaluation included.
 - The distilled S keeps within 1.1 mAP / 0.2 Rank-1 of its 4x-larger teacher
   and slightly beats it at Rank-10; the distilled P keeps within 2.2 mAP of
-  the 10x-larger S at a quarter of its FLOPs.
+  the 10x-larger S at a quarter of its FLOPs. N starts from a
+  function-preserving width expansion of the distilled P (zero-shot identical
+  to P), dips during warmup and recovers to +0.6 mAP over P — the expansion
+  chain P -> N -> T carries accumulated gains forward.
 
 ## ONNX export
 
