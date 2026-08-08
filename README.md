@@ -388,49 +388,30 @@ smaller student.
 Best checkpoints per variant, evaluated on the unified test split (1,362
 identities; 4,744 query / 29,942 gallery images across the five domains; no
 re-ranking). These numbers are not comparable to the single-benchmark tables
-above. All runs: single RTX 3070 (8 GB), AMP, 60 epochs, batch 64, the
-`*_8gb` configs as committed.
+above. All runs: single RTX 3070 (8 GB), AMP, batch 64, the `*_8gb` configs
+as committed.
 
 | Variant | Backbone | Params | GFLOPs @256x128 | Embedding | Trained by | mAP | Rank-1 | Rank-5 | Rank-10 |
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
-| B | ViT-B/16 (768 / 12 layers) | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` | **93.3** | **97.1** | **98.2** | 98.4 |
-| S | ViT-S/16 (384 / 12 layers) | 22.0M | 2.94 | 384 | Distillation from B | 92.2 | 96.9 | 98.1 | **98.6** |
-| T-a (retired) | ViT (384 / 6 layers) | 10.9M | ~1.48 | 384 | Distillation from B, initialized by inheriting 6 blocks of the distilled S | 88.3 | 94.9 | 97.4 | 98.2 |
-| T-b (retired) | ViT (256 / 12 layers) | 9.7M | ~1.35 | 256 | Distillation from B, width-selection init from the distilled S | 89.1 | 95.5 | 97.7 | 98.3 |
-| N-ViT (retired) | ViT (192 / 12 layers) | 5.5M | ~0.76 | 192 | Distillation from B (80 epochs), DeiT-Tiny ImageNet init | 81.1 | 90.7 | 95.7 | 97.2 |
+| B | ViT-B/16 (768 / 12 layers) | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` (60 epochs) | **93.3** | **97.1** | **98.2** | 98.4 |
+| S | ViT-S/16 (384 / 12 layers) | 22.0M | 2.94 | 384 | Distillation from B (60 epochs) | 92.2 | 96.9 | 98.1 | **98.6** |
 | **P** | OSNet x1.0 | 2.2M | 0.98 | 512 | Distillation from B (100 epochs, Adam 3.5e-4), OSNet ImageNet init | 90.0 | 96.1 | 97.8 | 98.4 |
 
-The ladder below S has been reassigned to the OSNet family after the
-distilled OSNet x1.0 (2.2M) overtook all three ViT candidates above:
-**T = OSNet x1.5** (4.6M / 2.12 GFLOPs), **N = OSNet x1.25** (3.3M / 1.49
-GFLOPs), P = OSNet x1.0, F = x0.75, A = x0.5. The retired ViT rows are kept
-as the measurement record; see
-[`docs/lightweight_students.md`](docs/lightweight_students.md) for the
-revised design. Results for the new T/N/P tiers are added as their training
-completes.
+The ladder below S is the OSNet family: **T = OSNet x1.5** (4.6M / 2.12
+GFLOPs), **N = OSNet x1.25** (3.3M / 1.49 GFLOPs), P = OSNet x1.0,
+F = x0.75, A = x0.5. Results for the remaining tiers are added as their
+training completes. The retired ViT student candidates and their measured
+results are recorded in
+[`docs/lightweight_students.md`](docs/lightweight_students.md).
 
 - Best files: `logs/reid_vit_base_8gb/transformer_best_e000060_map0.93305.pth`,
-  `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`,
-  `logs/reid_vit_t_8gb_distill/transformer_best_e000057_map0.88279.pth`,
-  `logs/reid_vit_t256_8gb_distill/transformer_best_e000060_map0.89131.pth`,
-  `logs/reid_vit_n_8gb_distill/transformer_best_e000079_map0.81138.pth` and
-  `logs/reid_osnet_p_8gb_distill/transformer_best_e000099_map0.90048.pth`.
+  `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`
+  and `logs/reid_osnet_p_8gb_distill/transformer_best_e000099_map0.90048.pth`.
 - Wall-clock on the RTX 3070: ~12.9 h (B, ~750 s/epoch), ~8.5 h (S + teacher
-  forward), ~6.1 h (T-a), ~6.7 h (T-b), ~9.0 h (N, 80 epochs); per-epoch
-  evaluation included.
+  forward), ~15.5 h (P, 100 epochs); per-epoch evaluation included.
 - The distilled S keeps within 1.1 mAP / 0.2 Rank-1 of its 4x-larger teacher
-  and slightly beats it at Rank-10.
-- Width-vs-depth at the T tier: keeping depth 12 (T-b) beats the
-  layer-dropped T-a by 0.8 mAP with fewer parameters and FLOPs, despite T-a
-  starting from a far stronger init (zero-shot 62.5 vs 0.6 mAP after one
-  epoch/at init) — depth matters more than width for this tier. Note that
-  T-b's deeper stack is ~11% slower in measured training step time than T-a
-  at equal batch despite the lower FLOPs; batch-1 inference latency should
-  be measured on the target runtime before the tier is finalized. Both
-  variants remain below the 1-2 mAP gate vs S (T-b: 3.1 mAP) defined in
-  [`docs/lightweight_students.md`](docs/lightweight_students.md).
-- The design of the remaining lightweight tiers (T/N/P/F/A) is documented in
-  [`docs/lightweight_students.md`](docs/lightweight_students.md).
+  and slightly beats it at Rank-10; the distilled P keeps within 2.2 mAP of
+  the 10x-larger S at a quarter of its FLOPs.
 
 ## ONNX export
 
