@@ -1,11 +1,15 @@
-# Unified reid dataset / distill ViT-B/16 teacher -> tier P-ain student (OSNet-AIN x1.0) / 8 GB GPU
-# P = OSNet x1.0 (2.2M backbone, 0.98 GFLOPs, feature dim 512), initialized
-# from the Torchreid ImageNet weights. CNN tier uses the classic BNNeck CNN
-# recipe: Adam 3.5e-4, flat bias LR, weight decay 5e-4. 100 epochs per the
-# lightweight-students design (smaller tiers benefit from longer schedules).
+# Unified reid dataset / distill B-ain teacher -> tier T-ain student (OSNet-AIN x1.5) / 8 GB GPU
+# T-ain = OSNet-AIN x1.5 (4.6M backbone, 2.12 GFLOPs, feature dim 512),
+# initialized by function-preserving width expansion of the distilled N-ain
+# best — the growth chain P -> N -> T measured best on the BN ladder.
+# Generate with:
+#   python tools/init_width_expand.py \
+#     --src "logs/reid_osnet_n_8gb_distill_ain/transformer_best_*.pth" \
+#     --dst ../pretrained/osnet_ain_x1_5_init_from_n.pth --arch osnet_ain_x1_5
+# Recipe: Adam 3.5e-4, wd 5e-4, 100 epochs (same as the BN sibling).
 MODEL:
   PRETRAIN_CHOICE: 'self'
-  PRETRAIN_PATH: '../pretrained/osnet_ain_x1_5_init_from_p.pth'
+  PRETRAIN_PATH: '../pretrained/osnet_ain_x1_5_init_from_n.pth'
   PRETRAIN_HW_RATIO: 1
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'
