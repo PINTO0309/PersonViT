@@ -2,7 +2,9 @@ __pycache__/
 *.py[cod]
 onnx/*.onnx
 *.pth
-transreid_pytorch/data/
-transreid_pytorch/logs/
+transreid_pytorch/data/*
+!transreid_pytorch/data/.gitkeep
+transreid_pytorch/logs/*
+!transreid_pytorch/logs/.gitkeep
 _pyproject.toml
 .venv/
