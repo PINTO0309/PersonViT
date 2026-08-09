@@ -374,7 +374,7 @@ smaller student.
 
 ### Results on the unified test set
 
-Best checkpoints per variant, evaluated on the unified test split (1,362 identities; 4,744 query / 29,942 gallery images across the five domains; no re-ranking).
+Best checkpoints per variant, evaluated on the unified test split.
 
 | Var | Backbone | Params | GFLOPs<br>@256x128 | Emb | mAP | Rank-1 | Rank-5 | Rank-10 |
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
@@ -386,18 +386,11 @@ Best checkpoints per variant, evaluated on the unified test split (1,362 identit
 | S-ain | ViT-S/16 + token-IN | 22.0M | 2.94 | 384 | 91.4 | 96.3 | 97.9 | 98.4 |
 
 - The retired ViT student candidates and their measured results are recorded in [`docs/lightweight_students.md`](docs/lightweight_students.md).
-- B-ain is the teacher of the domain-generalization (`-ain`) ladder
-  ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance
-  normalization after the patch embedding, trained with the B recipe over 75
-  epochs (the token-IN insertion costs a few adaptation epochs and, at
-  convergence, 1.2 mAP of in-distribution accuracy versus B — the accepted
-  price of style invariance).
+- B-ain is the teacher of the domain-generalization (`-ain`) ladder   ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance normalization after the patch embedding, trained with the B recipe over 75 epochs (the token-IN insertion costs a few adaptation epochs and, at convergence, 1.2 mAP of in-distribution accuracy versus B — the accepted price of style invariance).
 
 #### `-ain` variants vs the standard ladder
 
-Every tier exists (or is planned) in two flavors that share the same
-training recipe, data and evaluation protocol; the only difference is where
-the network normalizes:
+Every tier exists (or is planned) in two flavors that share the same training recipe, data and evaluation protocol; the only difference is where the network normalizes:
 
 | | Standard ladder (B/S/T/N/P/F/A) | `-ain` ladder (B-ain, S-ain, ...) |
 | --- | --- | --- |
