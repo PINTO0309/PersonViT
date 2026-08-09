@@ -99,7 +99,7 @@ temperature, gamma 0.6/1.6) and matches them against the clean gallery —
 the mixed old/new-camera scenario that style sensitivity breaks first.
 Measured on the three completed BN/-ain pairs:
 
-| Pair | Clean cost of -ain | Mean mAP drop over the 8 shifts (BN -> -ain) | Worst shift (warm): absolute mAP (BN -> -ain) |
+| Pair | Clean cost of -ain | Mean mAP drop over the 8 shifts<br>(BN -> -ain) | Worst shift (warm): absolute mAP<br>(BN -> -ain) |
 | --- | ---: | ---: | ---: |
 | B / B-ain | -1.2 | 5.2 -> 3.4 (-34%) | 69.7 -> **74.3** |
 | S / S-ain | -0.8 | 5.3 -> 3.9 (-26%) | 69.5 -> **70.1** |
