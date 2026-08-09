@@ -396,28 +396,12 @@ training completes. The retired ViT student candidates and their measured
 results are recorded in
 [`docs/lightweight_students.md`](docs/lightweight_students.md).
 
-- Best files: `logs/reid_vit_base_8gb/transformer_best_e000060_map0.93305.pth`,
-  `logs/reid_vit_base_8gb_ain/transformer_best_e000055_map0.92092.pth`,
-  `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`,
-  `logs/reid_vit_small_8gb_distill_ain/transformer_best_e000075_map0.91395.pth`,
-  `logs/reid_osnet_n_8gb_distill/transformer_best_e000099_map0.90604.pth`
-  and `logs/reid_osnet_p_8gb_distill/transformer_best_e000099_map0.90048.pth`.
-- Wall-clock on the RTX 3070: ~12.9 h (B, ~750 s/epoch), ~8.5 h (S + teacher
-  forward), ~15.5 h (P, 100 epochs), ~18 h (N, 100 epochs); per-epoch
-  evaluation included.
-- The distilled S keeps within 1.1 mAP / 0.2 Rank-1 of its 4x-larger teacher
-  and slightly beats it at Rank-10; the distilled P keeps within 2.2 mAP of
-  the 10x-larger S at a quarter of its FLOPs. N starts from a
-  function-preserving width expansion of the distilled P (zero-shot identical
-  to P), dips during warmup and recovers to +0.6 mAP over P — the expansion
-  chain P -> N -> T carries accumulated gains forward.
 - B-ain is the teacher of the domain-generalization (`-ain`) ladder
   ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance
   normalization after the patch embedding, trained with the B recipe over 75
   epochs (the token-IN insertion costs a few adaptation epochs and, at
   convergence, 1.2 mAP of in-distribution accuracy versus B — the accepted
-  price of style invariance). Trained across two GPUs: epochs 1-21 on the
-  RTX 3070, epochs 22-75 resumed on an RTX PRO 6000 (~2.7 min/epoch).
+  price of style invariance).
 
 #### `-ain` variants vs the standard ladder
 
