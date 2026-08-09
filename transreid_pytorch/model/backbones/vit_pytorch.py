@@ -228,7 +228,7 @@ class PatchEmbed(nn.Module):
 class TransReID(nn.Module):
     """ Transformer-based Object Re-Identification
     """
-    def __init__(self, img_size=224, patch_size=16, stride_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0., camera=0, view=0,drop_path_rate=0., norm_layer=partial(nn.LayerNorm, eps=1e-6), local_feature=False, sie_xishu =1.0, hw_ratio=1, pool_method=None, stem_conv=False):
+    def __init__(self, img_size=224, patch_size=16, stride_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0., camera=0, view=0,drop_path_rate=0., norm_layer=partial(nn.LayerNorm, eps=1e-6), local_feature=False, sie_xishu =1.0, hw_ratio=1, pool_method=None, stem_conv=False, token_in=False, token_in_mid_block=None):
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -236,6 +236,18 @@ class TransReID(nn.Module):
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, stride_size=stride_size, in_chans=in_chans,
             embed_dim=embed_dim, stem_conv = stem_conv)
+        # AIN-style early style removal for ViT: per-sample, per-channel
+        # instance normalization over the token axis, applied to the patch
+        # embeddings before the cls token and positional embedding. Only the
+        # IN affine is a new parameter, so pretrained checkpoints still load.
+        self.token_in = nn.InstanceNorm1d(embed_dim, affine=True) if token_in else None
+        # ablation slot: a second token-IN applied to the patch tokens (cls
+        # excluded) after the block with this 0-based index
+        self.token_in_mid_block = token_in_mid_block
+        self.token_in_mid = (
+            nn.InstanceNorm1d(embed_dim, affine=True)
+            if token_in_mid_block is not None else None
+        )
 
         num_patches = self.patch_embed.num_patches
 
@@ -308,6 +320,8 @@ class TransReID(nn.Module):
     def forward_features(self, x, camera_id, view_id):
         B = x.shape[0]
         x = self.patch_embed(x)
+        if self.token_in is not None:
+            x = self.token_in(x.transpose(1, 2)).transpose(1, 2)
 
         cls_tokens = self.cls_token.expand(B, -1, -1)  # stole cls_tokens impl from Phil Wang, thanks
         x = torch.cat((cls_tokens, x), dim=1)
@@ -328,9 +342,11 @@ class TransReID(nn.Module):
                 x = blk(x)
             return x
 
-        for blk in self.blocks:
+        for block_index, blk in enumerate(self.blocks):
             x = blk(x)
-
+            if self.token_in_mid is not None and block_index == self.token_in_mid_block:
+                patches = self.token_in_mid(x[:, 1:].transpose(1, 2)).transpose(1, 2)
+                x = torch.cat((x[:, :1], patches), dim=1)
 
         x = self.norm(x)
         if self.pool_method == 'gem':
@@ -435,6 +451,22 @@ def vit_base_patch16_224_TransReID(img_size=(256, 128), stride_size=16, drop_pat
 
 def vit_small_patch16_224_TransReID(img_size=(256, 128), stride_size=16, drop_path_rate=0.1, camera=0, view=0, local_feature=False, sie_xishu=1.5, **kwargs):
     model = TransReID(img_size=img_size, patch_size=16, stride_size=stride_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,drop_path_rate=drop_path_rate, camera=camera, view=view, sie_xishu=sie_xishu, local_feature=local_feature,  **kwargs)
+    model.in_planes = 384
+    return model
+
+def vit_base_ain_patch16_224_TransReID(img_size=(256, 128), stride_size=16, drop_path_rate=0.1, camera=0, view=0,local_feature=False,sie_xishu=1.5, **kwargs):
+    # B-ain: ViT-B with token-axis instance normalization after the patch embedding
+    model = TransReID(img_size=img_size, patch_size=16, stride_size=stride_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True, camera=camera, view=view, drop_path_rate=drop_path_rate, sie_xishu=sie_xishu, local_feature=local_feature, token_in=True, **kwargs)
+    return model
+
+def vit_base_ain2_patch16_224_TransReID(img_size=(256, 128), stride_size=16, drop_path_rate=0.1, camera=0, view=0,local_feature=False,sie_xishu=1.5, **kwargs):
+    # B-ain2 ablation: patch-level token-IN plus a second token-IN after block 2
+    model = TransReID(img_size=img_size, patch_size=16, stride_size=stride_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True, camera=camera, view=view, drop_path_rate=drop_path_rate, sie_xishu=sie_xishu, local_feature=local_feature, token_in=True, token_in_mid_block=1, **kwargs)
+    return model
+
+def vit_small_ain_patch16_224_TransReID(img_size=(256, 128), stride_size=16, drop_path_rate=0.1, camera=0, view=0, local_feature=False, sie_xishu=1.5, **kwargs):
+    # S-ain: ViT-S with token-axis instance normalization after the patch embedding
+    model = TransReID(img_size=img_size, patch_size=16, stride_size=stride_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,drop_path_rate=drop_path_rate, camera=camera, view=view, sie_xishu=sie_xishu, local_feature=local_feature, token_in=True,  **kwargs)
     model.in_planes = 384
     return model
 
