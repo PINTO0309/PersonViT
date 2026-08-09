@@ -396,14 +396,12 @@ Every tier exists (or is planned) in two flavors that share the same training re
 | --- | --- | --- |
 | Normalization | BatchNorm (CNN) / LayerNorm (ViT) only | Adds instance normalization at style-sensitive early positions: token-axis IN after the ViT patch embedding; the searched OSNet-AIN placement (IN stem + four IN blocks) for CNN tiers |
 | What the IN does | — | Removes each image's own style statistics (illumination, color cast, camera tone) from the features at inference time |
-| In-distribution accuracy | Highest on the unified test set | Slightly lower by design (measured: B-ain 92.1 vs B 93.3 mAP) |
+| In-distribution accuracy | Highest on the unified test set | Slightly lower by design |
 | Unseen-environment robustness | Sensitive to camera/style shift; BatchNorm also carries training-set statistics into deployment | Style-invariant features and per-sample normalization; the intended advantage on cameras and lighting never seen in training (not measurable on this in-distribution benchmark) |
-| Teacher for distilled tiers | B | B-ain (so distillation reinforces the invariance instead of fighting it) |
+| Teacher for distilled tiers | B | B-ain |
 | ONNX | BatchNorm folds away entirely | InstanceNormalization nodes remain (runtime normalization; ViT: 1 node, OSNet: 5) with a small latency overhead |
 
-Choose the standard ladder when the deployment cameras resemble the
-training domains, and the `-ain` ladder when deploying to new environments
-without target-domain fine-tuning.
+Choose the standard ladder when the deployment cameras resemble the training domains, and the `-ain` ladder when deploying to new environments without target-domain fine-tuning.
 
 ### Evaluating on the original datasets' official splits
 
@@ -430,19 +428,16 @@ Then evaluate any variant by pairing its config with its best checkpoint:
 ```shell
 cd transreid_pytorch
 python tools/eval_official.py \
-  --config configs/reid/osnet_n_8gb_distill.yml \
-  --weight "logs/reid_osnet_n_8gb_distill/transformer_best_*.pth"
+--config configs/reid/osnet_n_8gb_distill.yml \
+--weight "logs/reid_osnet_n_8gb_distill/transformer_best_*.pth"
 
 # selected datasets only: market / msmt17 / duke_occ / cuhk03np / occ_reid
 python tools/eval_official.py --config configs/reid/vit_base_8gb.yml \
-  --weight "logs/reid_vit_base_8gb/transformer_best_*.pth" \
-  --datasets market occ_reid
+--weight "logs/reid_vit_base_8gb/transformer_best_*.pth" \
+--datasets market occ_reid
 ```
 
-The model is built once and reused across datasets; reported columns are
-mAP / Rank-1 / Rank-5 / Rank-10 per dataset. The MSMT17 protocol compares
-11,659 queries against 82,161 gallery images and needs roughly 15 GB of
-host RAM for its distance and ranking matrices.
+The model is built once and reused across datasets; reported columns are mAP / Rank-1 / Rank-5 / Rank-10 per dataset. The MSMT17 protocol compares 11,659 queries against 82,161 gallery images and needs roughly 15 GB of host RAM for its distance and ranking matrices.
 
 ## ONNX export
 
