@@ -385,6 +385,7 @@ as committed.
 | B | ViT-B/16 (768 / 12 layers) | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` (60 epochs) | **93.3** | **97.1** | **98.2** | 98.4 |
 | B-ain | ViT-B/16 + token-IN | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` (75 epochs) | 92.1 | 96.5 | 97.8 | 98.2 |
 | S | ViT-S/16 (384 / 12 layers) | 22.0M | 2.94 | 384 | Distillation from B (60 epochs) | 92.2 | 96.9 | 98.1 | **98.6** |
+| S-ain | ViT-S/16 + token-IN | 22.0M | 2.94 | 384 | Distillation from B-ain (75 epochs) | 91.4 | 96.3 | 97.9 | 98.4 |
 | **N** | OSNet x1.25 | 3.3M | 1.49 | 512 | Distillation from B (100 epochs, Adam 3.5e-4), function-preserving expansion of the distilled P | 90.6 | 96.0 | 97.9 | 98.4 |
 | **P** | OSNet x1.0 | 2.2M | 0.98 | 512 | Distillation from B (100 epochs, Adam 3.5e-4), OSNet ImageNet init | 90.0 | 96.1 | 97.8 | 98.4 |
 
@@ -398,6 +399,7 @@ results are recorded in
 - Best files: `logs/reid_vit_base_8gb/transformer_best_e000060_map0.93305.pth`,
   `logs/reid_vit_base_8gb_ain/transformer_best_e000055_map0.92092.pth`,
   `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`,
+  `logs/reid_vit_small_8gb_distill_ain/transformer_best_e000075_map0.91395.pth`,
   `logs/reid_osnet_n_8gb_distill/transformer_best_e000099_map0.90604.pth`
   and `logs/reid_osnet_p_8gb_distill/transformer_best_e000099_map0.90048.pth`.
 - Wall-clock on the RTX 3070: ~12.9 h (B, ~750 s/epoch), ~8.5 h (S + teacher
