@@ -1,0 +1,75 @@
+# Unified reid dataset / distill B-ain teacher -> tier P-ain-deep student / 8 GB GPU
+# P-ain-deep = OSNet-AIN x1.0 + 1 plain OSBlock per stage (2.7M backbone,
+# 1.27 GFLOPs, feature dim 512), initialized by function-preserving depth
+# expansion of the distilled P-ain best (appended blocks start as exact
+# identities via zeroed closing-BN affine). Generate with:
+#   python tools/init_depth_expand.py \
+#     --src "logs/reid_osnet_p_8gb_distill_ain/transformer_best_*.pth" \
+#     --dst ../pretrained/osnet_ain_x1_0_deep_init_from_p.pth \
+#     --arch osnet_ain_x1_0_deep
+# Recipe: Adam 3.5e-4, wd 5e-4, 100 epochs (same as the -ain siblings).
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: '../pretrained/osnet_ain_x1_0_deep_init_from_p.pth'
+  PRETRAIN_HW_RATIO: 1
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'osnet_ain_x1_0_deep'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+DISTILL:
+  ENABLED: True
+  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain/transformer_best_*.pth'
+  LOGIT_WEIGHT: 1.0
+  REL_WEIGHT: 30.0
+  EMBED_WEIGHT: 0.0
+  TEMPERATURE: 4.0
+
+SOLVER:
+  OPTIMIZER_NAME: 'Adam'
+  MAX_EPOCHS: 100
+  BASE_LR: 0.00035
+  WARMUP_EPOCHS: 10
+  IMS_PER_BATCH: 64
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  5e-4
+  WEIGHT_DECAY_BIAS: 5e-4
+  BIAS_LR_FACTOR: 1
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_deep'

@@ -97,12 +97,13 @@ directly, so the -ain ladder is judged by non-inferiority plus proxies:
 photometric shifts (brightness ±30%, contrast ±40%, warm/cool color
 temperature, gamma 0.6/1.6) and matches them against the clean gallery —
 the mixed old/new-camera scenario that style sensitivity breaks first.
-Measured on the three completed BN/-ain pairs:
+Measured on the four completed BN/-ain pairs:
 
 | Pair | Clean cost of -ain | Mean mAP drop over the 8 shifts<br>(BN -> -ain) | Worst shift (warm): absolute mAP<br>(BN -> -ain) |
 | --- | ---: | ---: | ---: |
 | B / B-ain | -1.2 | 5.2 -> 3.4 (-34%) | 69.7 -> **74.3** |
 | S / S-ain | -0.8 | 5.3 -> 3.9 (-26%) | 69.5 -> **70.1** |
+| N / N-ain | -2.7 | 10.9 -> **5.8 (halved)** | 65.3 -> **71.9** |
 | P / P-ain | -3.0 | 10.3 -> **5.1 (halved)** | 63.7 -> **73.7** |
 
 Key findings:
@@ -114,15 +115,36 @@ Key findings:
    exactly). `bright+30%`/`contrast+40%` break affinity through pixel
    clipping and channel-selective color shifts are only partially removable,
    matching theory.
-2. **The CNN tier gains most**: BN-P is the most fragile model (mean
-   -10.3 mAP under shift); P-ain halves the degradation and beats BN-P by
-   up to 10 mAP absolute under moderate-to-severe shifts. Its 3-point
-   in-distribution cost buys the largest robustness dividend in the ladder,
-   justifying the CNN -ain tiers despite missing the in-distribution
-   non-inferiority gate.
+2. **The CNN tiers gain most**: the BN CNN models are the most fragile in
+   the ladder (mean -10.3/-10.9 mAP under shift for P/N); the -ain versions
+   halve the degradation and beat their BN siblings by up to 10 mAP absolute
+   under moderate-to-severe shifts. Their ~3-point in-distribution cost buys
+   the largest robustness dividend in the ladder, justifying the CNN -ain
+   tiers despite missing the in-distribution non-inferiority gate.
 3. **The selection guidance is now quantitative**: the BN ladder wins only
    when deployment conditions match training; under any noticeable style
    shift the -ain ladder matches or exceeds it in absolute terms.
+
+## Depth-expanded variants (X-ain-deep)
+
+A second, depth-based growth axis for the CNN tiers: `osnet_ain_x*_deep`
+appends **one plain OSBlock (no IN) at the end of each stage** on top of the
+corresponding -ain tier. Appending at stage end keeps every existing
+parameter name unchanged and leaves the searched IN arrangement (and the
+ONNX IN-node count) untouched.
+
+| Variant | Backbone params | GFLOPs @256x128 | Config | Init source |
+| --- | ---: | ---: | --- | --- |
+| P-ain-deep | 2.74M | 1.27 | `osnet_p_8gb_distill_ain_deep.yml` | P-ain best |
+| N-ain-deep | 4.17M | 1.94 | `osnet_n_8gb_distill_ain_deep.yml` | N-ain best |
+| T-ain-deep | 5.88M | 2.76 | `osnet_t_8gb_distill_ain_deep.yml` | T-ain best (run T-ain first) |
+
+Initialization is function-preserving like the width chain, via
+`tools/init_depth_expand.py`: the appended blocks are residual, so zeroing
+their closing-BN affine makes each an exact identity — the deep model
+reproduces its source's outputs to 0.0 at initialization (verified) and the
+new blocks are recruited through their BN scales during training. Recipes
+are unchanged (Adam 3.5e-4, wd 5e-4, 100 epochs, B-ain teacher).
 
 ## Export and deployment notes
 

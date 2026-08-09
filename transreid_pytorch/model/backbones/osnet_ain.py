@@ -168,14 +168,19 @@ class OSBlockINin(nn.Module):
 class OSNetAIN(nn.Module):
     """OSNet-AIN feature extractor with the TransReID backbone interface."""
 
-    def __init__(self, channels=(64, 256, 384, 512), feature_dim=512):
+    def __init__(self, channels=(64, 256, 384, 512), feature_dim=512,
+                 extra_blocks=(0, 0, 0)):
         super(OSNetAIN, self).__init__()
         self.conv1 = ConvLayer(3, channels[0], 7, stride=2, padding=3, IN=True)
         self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
-        # searched arrangement of osnet_ain_x1_0
+        # searched arrangement of osnet_ain_x1_0; extra_blocks appends plain
+        # OSBlocks at the end of each stage (existing parameter names stay
+        # unchanged, and the searched IN placement is not disturbed) —
+        # identity-initialize the appended blocks via tools/init_depth_expand.py
         self.conv2 = nn.Sequential(
             OSBlockINin(channels[0], channels[1]),
             OSBlockINin(channels[1], channels[1]),
+            *[OSBlock(channels[1], channels[1]) for _ in range(extra_blocks[0])],
         )
         self.pool2 = nn.Sequential(
             Conv1x1(channels[1], channels[1]),
@@ -184,6 +189,7 @@ class OSNetAIN(nn.Module):
         self.conv3 = nn.Sequential(
             OSBlock(channels[1], channels[2]),
             OSBlockINin(channels[2], channels[2]),
+            *[OSBlock(channels[2], channels[2]) for _ in range(extra_blocks[1])],
         )
         self.pool3 = nn.Sequential(
             Conv1x1(channels[2], channels[2]),
@@ -192,6 +198,7 @@ class OSNetAIN(nn.Module):
         self.conv4 = nn.Sequential(
             OSBlockINin(channels[2], channels[3]),
             OSBlock(channels[3], channels[3]),
+            *[OSBlock(channels[3], channels[3]) for _ in range(extra_blocks[2])],
         )
         self.conv5 = Conv1x1(channels[3], channels[3])
         self.global_avgpool = nn.AdaptiveAvgPool2d(1)
@@ -270,6 +277,24 @@ def osnet_ain_x1_5(**kwargs):
 
 def osnet_ain_x0_75(**kwargs):
     return OSNetAIN(channels=(48, 192, 288, 384), feature_dim=512)
+
+
+def osnet_ain_x1_0_deep(**kwargs):
+    # depth-expanded tier (+1 plain OSBlock per stage); init via tools/init_depth_expand.py
+    return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512,
+                    extra_blocks=(1, 1, 1))
+
+
+def osnet_ain_x1_25_deep(**kwargs):
+    # depth-expanded tier (+1 plain OSBlock per stage); init via tools/init_depth_expand.py
+    return OSNetAIN(channels=(80, 320, 480, 640), feature_dim=512,
+                    extra_blocks=(1, 1, 1))
+
+
+def osnet_ain_x1_5_deep(**kwargs):
+    # depth-expanded tier (+1 plain OSBlock per stage); init via tools/init_depth_expand.py
+    return OSNetAIN(channels=(96, 384, 576, 768), feature_dim=512,
+                    extra_blocks=(1, 1, 1))
 
 
 def osnet_ain_x0_5(**kwargs):
