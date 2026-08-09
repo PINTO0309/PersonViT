@@ -374,11 +374,7 @@ smaller student.
 
 ### Results on the unified test set
 
-Best checkpoints per variant, evaluated on the unified test split (1,362
-identities; 4,744 query / 29,942 gallery images across the five domains; no
-re-ranking). These numbers are not comparable to the single-benchmark tables
-above. All runs: single RTX 3070 (8 GB), AMP, batch 64, the `*_8gb` configs
-as committed.
+Best checkpoints per variant, evaluated on the unified test split (1,362 identities; 4,744 query / 29,942 gallery images across the five domains; no re-ranking).
 
 | Var | Backbone | Params | GFLOPs<br>@256x128 | Emb | mAP | Rank-1 | Rank-5 | Rank-10 |
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
@@ -389,13 +385,7 @@ as committed.
 | B-ain | ViT-B/16 + token-IN | 86.5M | 11.35 | 768 | 92.1 | 96.5 | 97.8 | 98.2 |
 | S-ain | ViT-S/16 + token-IN | 22.0M | 2.94 | 384 | 91.4 | 96.3 | 97.9 | 98.4 |
 
-The ladder below S is the OSNet family: **T = OSNet x1.5** (4.6M / 2.12
-GFLOPs), **N = OSNet x1.25** (3.3M / 1.49 GFLOPs), P = OSNet x1.0,
-F = x0.75, A = x0.5. Results for the remaining tiers are added as their
-training completes. The retired ViT student candidates and their measured
-results are recorded in
-[`docs/lightweight_students.md`](docs/lightweight_students.md).
-
+- The retired ViT student candidates and their measured results are recorded in [`docs/lightweight_students.md`](docs/lightweight_students.md).
 - B-ain is the teacher of the domain-generalization (`-ain`) ladder
   ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance
   normalization after the patch embedding, trained with the B recipe over 75
