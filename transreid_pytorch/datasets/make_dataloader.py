@@ -14,6 +14,8 @@ from .sampler_domain import DomainBalancedIdentitySampler
 import torch.distributed as dist
 from .mm import MM
 from .reid import REID
+from .cuhk03np import CUHK03NP
+from .occ_reid import OccludedREID
 __factory = {
     'market1501': Market1501,
     'msmt17': MSMT17,
@@ -21,6 +23,8 @@ __factory = {
     'occ_duke': OCC_DukeMTMCreID,
     'mm': MM,
     'reid': REID,
+    'cuhk03np': CUHK03NP,
+    'occ_reid': OccludedREID,
 }
 
 def train_collate_fn(batch):

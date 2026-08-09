@@ -408,6 +408,45 @@ results are recorded in
   to P), dips during warmup and recovers to +0.6 mAP over P — the expansion
   chain P -> N -> T carries accumulated gains forward.
 
+### Evaluating on the original datasets' official splits
+
+[`tools/eval_official.py`](transreid_pytorch/tools/eval_official.py) runs any
+trained model against the original datasets' own query/gallery protocols
+(Market-1501, MSMT17, Occluded-Duke, CUHK03-NP detected, and Occluded-REID
+with occluded queries vs whole-body gallery) as a per-dataset performance
+reference.
+
+The loaders expect the canonical directory names under
+`transreid_pytorch/data/`; symlinks onto the original distributions are
+sufficient:
+
+```shell
+cd transreid_pytorch/data
+ln -sfn Market-1501-v15.09.15 market1501
+ln -sfn MSMT17_V1 MSMT17
+ln -sfn Occluded-DukeMTMC Occluded_Duke
+# CUHK03-NP and Occluded_REID are used under their own names
+```
+
+Then evaluate any variant by pairing its config with its best checkpoint:
+
+```shell
+cd transreid_pytorch
+python tools/eval_official.py \
+  --config configs/reid/osnet_n_8gb_distill.yml \
+  --weight "logs/reid_osnet_n_8gb_distill/transformer_best_*.pth"
+
+# selected datasets only: market / msmt17 / duke_occ / cuhk03np / occ_reid
+python tools/eval_official.py --config configs/reid/vit_base_8gb.yml \
+  --weight "logs/reid_vit_base_8gb/transformer_best_*.pth" \
+  --datasets market occ_reid
+```
+
+The model is built once and reused across datasets; reported columns are
+mAP / Rank-1 / Rank-5 / Rank-10 per dataset. The MSMT17 protocol compares
+11,659 queries against 82,161 gallery images and needs roughly 15 GB of
+host RAM for its distance and ranking matrices.
+
 ## ONNX export
 
 [`export_onnx.py`](export_onnx.py) exports all eight supervised PersonViTReID models (four datasets, each with ViT-S/16 and ViT-B/16) to the [`onnx`](onnx) directory. Missing PyTorch checkpoints are downloaded from the pinned `lakeAGI/PersonViTReID` revision automatically.
