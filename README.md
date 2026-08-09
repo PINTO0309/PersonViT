@@ -381,7 +381,7 @@ above. All runs: single RTX 3070 (8 GB), AMP, batch 64, the `*_8gb` configs
 as committed.
 
 | Var | Backbone | Params | GFLOPs @256x128 | Emb | mAP | Rank-1 | Rank-5 | Rank-10 |
-| --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
 | B | ViT-B/16 (768 / 12 layers) | 86.5M | 11.35 | 768 | **93.3** | **97.1** | **98.2** | 98.4 |
 | B-ain | ViT-B/16 + token-IN | 86.5M | 11.35 | 768 | 92.1 | 96.5 | 97.8 | 98.2 |
 | S | ViT-S/16 (384 / 12 layers) | 22.0M | 2.94 | 384 | 92.2 | 96.9 | 98.1 | **98.6** |
