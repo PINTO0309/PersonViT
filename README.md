@@ -383,11 +383,11 @@ as committed.
 | Var | Backbone | Params | GFLOPs<br>@256x128 | Emb | mAP | Rank-1 | Rank-5 | Rank-10 |
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
 | B | ViT-B/16 | 86.5M | 11.35 | 768 | 93.3 | 97.1 | 98.2 | 98.4 |
-| B-ain | ViT-B/16 + token-IN | 86.5M | 11.35 | 768 | 92.1 | 96.5 | 97.8 | 98.2 |
 | S | ViT-S/16 | 22.0M | 2.94 | 384 | 92.2 | 96.9 | 98.1 | 98.6 |
-| S-ain | ViT-S/16 + token-IN | 22.0M | 2.94 | 384 | 91.4 | 96.3 | 97.9 | 98.4 |
 | N | OSNet x1.25 | 3.3M | 1.49 | 512 | 90.6 | 96.0 | 97.9 | 98.4 |
 | P | OSNet x1.0 | 2.2M | 0.98 | 512 | 90.0 | 96.1 | 97.8 | 98.4 |
+| B-ain | ViT-B/16 + token-IN | 86.5M | 11.35 | 768 | 92.1 | 96.5 | 97.8 | 98.2 |
+| S-ain | ViT-S/16 + token-IN | 22.0M | 2.94 | 384 | 91.4 | 96.3 | 97.9 | 98.4 |
 
 The ladder below S is the OSNet family: **T = OSNet x1.5** (4.6M / 2.12
 GFLOPs), **N = OSNet x1.25** (3.3M / 1.49 GFLOPs), P = OSNet x1.0,
