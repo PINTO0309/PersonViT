@@ -380,7 +380,7 @@ re-ranking). These numbers are not comparable to the single-benchmark tables
 above. All runs: single RTX 3070 (8 GB), AMP, batch 64, the `*_8gb` configs
 as committed.
 
-| Var | Backbone | Params | GFLOPs<br>@256x128 | Emb | mAP | Rank1 | Rank5 | Rank10 |
+| Var | Backbone | Params | GFLOPs<br>@256x128 | Emb | mAP | Rank-1 | Rank-5 | Rank-10 |
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
 | B | ViT-B/16 | 86.5M | 11.35 | 768 | 93.3 | 97.1 | 98.2 | 98.4 |
 | B-ain | ViT-B/16 + token-IN | 86.5M | 11.35 | 768 | 92.1 | 96.5 | 97.8 | 98.2 |
