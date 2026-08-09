@@ -33,6 +33,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 
 from model.backbones import osnet as osnet_module
+from model.backbones import osnet_ain as osnet_ain_module
 
 
 def expand_into(target, source):
@@ -64,7 +65,10 @@ def main():
     backbone_src = {k[len('base.'):]: v for k, v in state.items()
                     if k.startswith('base.')} if prefixed else state
 
-    target = getattr(osnet_module, args.arch)().state_dict()
+    factory_module = (
+        osnet_ain_module if args.arch.startswith('osnet_ain') else osnet_module
+    )
+    target = getattr(factory_module, args.arch)().state_dict()
     out, expanded, copied = {}, 0, 0
     for key, tgt in target.items():
         src = backbone_src.get(key)
