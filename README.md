@@ -383,6 +383,7 @@ as committed.
 | Variant | Backbone | Params | GFLOPs @256x128 | Embedding | Trained by | mAP | Rank-1 | Rank-5 | Rank-10 |
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
 | B | ViT-B/16 (768 / 12 layers) | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` (60 epochs) | **93.3** | **97.1** | **98.2** | 98.4 |
+| B-ain | ViT-B/16 + token-IN | 86.5M | 11.35 | 768 | Fine-tuning from `checkpoint0260.pth` (75 epochs) | 92.1 | 96.5 | 97.8 | 98.2 |
 | S | ViT-S/16 (384 / 12 layers) | 22.0M | 2.94 | 384 | Distillation from B (60 epochs) | 92.2 | 96.9 | 98.1 | **98.6** |
 | **N** | OSNet x1.25 | 3.3M | 1.49 | 512 | Distillation from B (100 epochs, Adam 3.5e-4), function-preserving expansion of the distilled P | 90.6 | 96.0 | 97.9 | 98.4 |
 | **P** | OSNet x1.0 | 2.2M | 0.98 | 512 | Distillation from B (100 epochs, Adam 3.5e-4), OSNet ImageNet init | 90.0 | 96.1 | 97.8 | 98.4 |
@@ -395,6 +396,7 @@ results are recorded in
 [`docs/lightweight_students.md`](docs/lightweight_students.md).
 
 - Best files: `logs/reid_vit_base_8gb/transformer_best_e000060_map0.93305.pth`,
+  `logs/reid_vit_base_8gb_ain/transformer_best_e000055_map0.92092.pth`,
   `logs/reid_vit_small_8gb_distill/transformer_best_e000057_map0.92205.pth`,
   `logs/reid_osnet_n_8gb_distill/transformer_best_e000099_map0.90604.pth`
   and `logs/reid_osnet_p_8gb_distill/transformer_best_e000099_map0.90048.pth`.
@@ -407,6 +409,32 @@ results are recorded in
   function-preserving width expansion of the distilled P (zero-shot identical
   to P), dips during warmup and recovers to +0.6 mAP over P — the expansion
   chain P -> N -> T carries accumulated gains forward.
+- B-ain is the teacher of the domain-generalization (`-ain`) ladder
+  ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance
+  normalization after the patch embedding, trained with the B recipe over 75
+  epochs (the token-IN insertion costs a few adaptation epochs and, at
+  convergence, 1.2 mAP of in-distribution accuracy versus B — the accepted
+  price of style invariance). Trained across two GPUs: epochs 1-21 on the
+  RTX 3070, epochs 22-75 resumed on an RTX PRO 6000 (~2.7 min/epoch).
+
+#### `-ain` variants vs the standard ladder
+
+Every tier exists (or is planned) in two flavors that share the same
+training recipe, data and evaluation protocol; the only difference is where
+the network normalizes:
+
+| | Standard ladder (B/S/T/N/P/F/A) | `-ain` ladder (B-ain, S-ain, ...) |
+| --- | --- | --- |
+| Normalization | BatchNorm (CNN) / LayerNorm (ViT) only | Adds instance normalization at style-sensitive early positions: token-axis IN after the ViT patch embedding; the searched OSNet-AIN placement (IN stem + four IN blocks) for CNN tiers |
+| What the IN does | — | Removes each image's own style statistics (illumination, color cast, camera tone) from the features at inference time |
+| In-distribution accuracy | Highest on the unified test set | Slightly lower by design (measured: B-ain 92.1 vs B 93.3 mAP) |
+| Unseen-environment robustness | Sensitive to camera/style shift; BatchNorm also carries training-set statistics into deployment | Style-invariant features and per-sample normalization; the intended advantage on cameras and lighting never seen in training (not measurable on this in-distribution benchmark) |
+| Teacher for distilled tiers | B | B-ain (so distillation reinforces the invariance instead of fighting it) |
+| ONNX | BatchNorm folds away entirely | InstanceNormalization nodes remain (runtime normalization; ViT: 1 node, OSNet: 5) with a small latency overhead |
+
+Choose the standard ladder when the deployment cameras resemble the
+training domains, and the `-ain` ladder when deploying to new environments
+without target-domain fine-tuning.
 
 ### Evaluating on the original datasets' official splits
 
