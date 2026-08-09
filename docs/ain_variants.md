@@ -85,10 +85,44 @@ directly, so the -ain ladder is judged by non-inferiority plus proxies:
 2. **Per-domain breakdown** (existing tools): special attention to the
    hardest domain (d01) and the occluded domains (d03/d04); a smaller
    worst-domain gap is itself weak evidence of better invariance.
-3. **Optional style-shift probe** (stays within the 5+5 protocol): evaluate
-   the same unified test split under photometric perturbations (illumination
-   gain, color temperature, contrast). The BN-vs-AIN delta under shift is
-   the in-protocol generalization signal. Small eval-only tool; no retraining.
+3. **Style-shift probe** (stays within the 5+5 protocol): evaluate the same
+   unified test split under photometric perturbations (illumination gain,
+   color temperature, contrast). The BN-vs-AIN delta under shift is the
+   in-protocol generalization signal. Implemented as
+   `tools/eval_style_shift.py`; measured results below.
+
+## Measured style-shift robustness (probe results)
+
+`tools/eval_style_shift.py` re-renders the queries under eight deterministic
+photometric shifts (brightness ±30%, contrast ±40%, warm/cool color
+temperature, gamma 0.6/1.6) and matches them against the clean gallery —
+the mixed old/new-camera scenario that style sensitivity breaks first.
+Measured on the three completed BN/-ain pairs:
+
+| Pair | Clean cost of -ain | Mean mAP drop over the 8 shifts (BN -> -ain) | Worst shift (warm): absolute mAP (BN -> -ain) |
+| --- | ---: | ---: | ---: |
+| B / B-ain | -1.2 | 5.2 -> 3.4 (-34%) | 69.7 -> **74.3** |
+| S / S-ain | -0.8 | 5.3 -> 3.9 (-26%) | 69.5 -> **70.1** |
+| P / P-ain | -3.0 | 10.3 -> **5.1 (halved)** | 63.7 -> **73.7** |
+
+Key findings:
+
+1. **Exact-zero degradation confirmed**: the -ain models lose exactly 0.0000
+   mAP under `dark-30%` and `contrast-40%` — the predicted mathematical
+   invariance (a global affine pixel change maps through the linear patch
+   embedding to a per-channel feature affine, which token-IN removes
+   exactly). `bright+30%`/`contrast+40%` break affinity through pixel
+   clipping and channel-selective color shifts are only partially removable,
+   matching theory.
+2. **The CNN tier gains most**: BN-P is the most fragile model (mean
+   -10.3 mAP under shift); P-ain halves the degradation and beats BN-P by
+   up to 10 mAP absolute under moderate-to-severe shifts. Its 3-point
+   in-distribution cost buys the largest robustness dividend in the ladder,
+   justifying the CNN -ain tiers despite missing the in-distribution
+   non-inferiority gate.
+3. **The selection guidance is now quantitative**: the BN ladder wins only
+   when deployment conditions match training; under any noticeable style
+   shift the -ain ladder matches or exceeds it in absolute terms.
 
 ## Export and deployment notes
 
