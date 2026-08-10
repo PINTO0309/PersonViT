@@ -394,6 +394,16 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 - The retired ViT student candidates and their measured results are recorded in [`docs/lightweight_students.md`](docs/lightweight_students.md).
 - B-ain is the teacher of the domain-generalization (`-ain`) ladder   ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance normalization after the patch embedding, trained with the B recipe over 75 epochs (the token-IN insertion costs a few adaptation epochs and, at convergence, 1.2 mAP of in-distribution accuracy versus B — the accepted price of style invariance).
 
+#### osnet_ain_ms_d_c - 2.2M
+
+| dataset | queries | gallery | mAP | R1 | R5 | R10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| market | 3,368 | 15,913 | 0.4580 | 0.7304 | 0.8655 | 0.9047 |
+| msmt17 | 11,659 | 82,161 | 0.4869 | 0.7613 | 0.8662 | 0.8965 |
+| duke_occ | 2,210 | 17,661 | 0.4757 | 0.6167 | 0.7670 | 0.8163 |
+| cuhk03np | 1,400 | 5,332 | 0.5776 | 0.6079 | 0.7779 | 0.8543 |
+| occ_reid | 1,000 | 1,000 | 0.7407 | 0.8040 | 0.8970 | 0.9320 |
+
 #### B-ain-aug -  ViT-B/16 + token-IN - 86.5M
 
 | dataset | queries | gallery | mAP | R1 | R5 | R10 |
@@ -493,7 +503,23 @@ python tools/eval_official.py --config configs/reid/vit_base_8gb.yml \
 --datasets market occ_reid
 ```
 
-The model is built once and reused across datasets; reported columns are mAP / Rank-1 / Rank-5 / Rank-10 per dataset. The MSMT17 protocol compares 11,659 queries against 82,161 gallery images and needs roughly 15 GB of host RAM for its distance and ranking matrices.
+The model is built once and reused across datasets; reported columns are mAP / Rank-1 / Rank-5 / Rank-10 per dataset. The MSMT17 protocol compares 11,659 queries against 82,161 gallery images and needs roughly 15 GB of host RAM for its distance and ranking matrices. Both tools accept `--markdown` for paste-ready tables.
+
+[`tools/eval_official_onnx.py`](transreid_pytorch/tools/eval_official_onnx.py) runs the same protocols through ONNX Runtime on a deployment artifact — exported models or third-party graphs alike (input/output tensor names are taken from the session, and features are L2-normalized on the evaluation side). The config supplies only the input pipeline; third-party torchreid models expect ImageNet normalization, overridable via the trailing opts:
+
+```shell
+# our exported artifact (0.5/0.5 normalization from the config)
+python tools/eval_official_onnx.py \
+--config configs/reid/osnet_p_8gb_distill_ain_aug2.yml \
+--onnx ../onnx/osnet_ain_x1_0_p_unified_aug_n.onnx
+
+# upstream torchreid OSNet-AIN (ImageNet normalization; trained on MS+D+C,
+# so only market / occ_reid are genuinely cross-domain references)
+python tools/eval_official_onnx.py \
+--config configs/reid/osnet_p_8gb_distill_ain.yml \
+--onnx ../onnx/osnet_ain_ms_d_c_Nx3x256x128.onnx \
+INPUT.PIXEL_MEAN "[0.485,0.456,0.406]" INPUT.PIXEL_STD "[0.229,0.224,0.225]"
+```
 
 ## ONNX export
 

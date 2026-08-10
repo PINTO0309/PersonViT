@@ -1,78 +1,85 @@
-"""Evaluate a trained model on the original datasets' official splits.
+"""Evaluate an ONNX model on the original datasets' official splits.
 
-Runs the standard single-dataset protocols (official query/gallery of each
-source dataset) as a per-dataset performance reference for models from this
-repository. Requires the original datasets under DATASETS.ROOT_DIR with the
-canonical loader names (symlinks are fine):
+The ONNX counterpart of tools/eval_official.py: feature extraction runs
+through ONNX Runtime on the deployment artifact itself, so exported models
+(and third-party ONNX graphs such as the upstream torchreid OSNet-AIN) get
+the same per-dataset reference numbers. Input/output tensor names are taken
+from the session, so foreign naming conventions (e.g. ``base_images`` /
+``features``) work unchanged; features are L2-normalized on the evaluation
+side, so unnormalized outputs are handled too.
 
-    market1501 -> Market-1501-v15.09.15
-    MSMT17     -> MSMT17_V1
-    Occluded_Duke -> Occluded-DukeMTMC
-    CUHK03-NP/detected, Occluded_REID (as-is)
+The config supplies the input pipeline only (SIZE_TEST, PIXEL_MEAN/STD,
+batch size). Third-party torchreid models expect ImageNet normalization —
+override it via the trailing opts:
 
 Usage (from transreid_pytorch/):
-    python tools/eval_official.py \
-        --config configs/reid/osnet_n_8gb_distill.yml \
-        --weight "logs/reid_osnet_n_8gb_distill/transformer_best_*.pth" \
-        [--datasets market cuhk03np ...]
+    python tools/eval_official_onnx.py \
+        --config configs/reid/osnet_p_8gb_distill_ain.yml \
+        --onnx ../onnx/osnet_ain_ms_d_c_Nx3x256x128.onnx \
+        INPUT.PIXEL_MEAN "[0.485,0.456,0.406]" INPUT.PIXEL_STD "[0.229,0.224,0.225]"
 """
 
 import argparse
-import glob
 import os
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
+import onnxruntime as ort
 import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 
 from config import cfg
 from datasets.bases import ImageDataset
-from datasets.cuhk03np import CUHK03NP
 from datasets.make_dataloader import val_collate_fn
-from datasets.market1501 import Market1501
-from datasets.msmt17 import MSMT17
-from datasets.occ_duke import OCC_DukeMTMCreID
-from datasets.occ_reid import OccludedREID
-from model import make_model
+from tools.eval_official import OFFICIAL_DATASETS
 from utils.metrics import euclidean_distance, eval_func
 
-OFFICIAL_DATASETS = {
-    'market': Market1501,
-    'msmt17': MSMT17,
-    'duke_occ': OCC_DukeMTMCreID,
-    'cuhk03np': CUHK03NP,
-    'occ_reid': OccludedREID,
-}
+
+def build_session(onnx_path: str) -> ort.InferenceSession:
+    available = ort.get_available_providers()
+    providers = [
+        provider
+        for provider in ("CUDAExecutionProvider", "CPUExecutionProvider")
+        if provider in available
+    ]
+    session = ort.InferenceSession(onnx_path, providers=providers)
+    print("providers  :", session.get_providers())
+    return session
 
 
-def extract_features(model, loader, device='cuda'):
+def extract_features(session: ort.InferenceSession, loader) -> torch.Tensor:
+    input_meta = session.get_inputs()[0]
+    output_name = session.get_outputs()[0].name
+    fixed_batch = isinstance(input_meta.shape[0], int)
     feats = []
-    model.eval()
-    with torch.no_grad():
-        for img, pid, camid, camids, target_view, _ in loader:
-            img = img.to(device)
-            camids_t = camids.to(device)
-            target_view = target_view.to(device)
-            feat = model(img, cam_label=camids_t, view_label=target_view)
-            feats.append(feat.detach().cpu())
-    return torch.cat(feats, dim=0)
+    for img, *_ in loader:
+        batch = img.numpy()
+        if fixed_batch and input_meta.shape[0] == 1:
+            outputs = [
+                session.run([output_name], {input_meta.name: row[None]})[0]
+                for row in batch
+            ]
+            feats.append(np.concatenate(outputs, axis=0))
+        else:
+            feats.append(session.run([output_name], {input_meta.name: batch})[0])
+    return torch.from_numpy(np.concatenate(feats, axis=0))
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--config', required=True,
-                    help='config defining the model architecture and input pipeline')
-    ap.add_argument('--weight', required=True, help='trained checkpoint (glob allowed)')
+                    help='config supplying the input pipeline (size, mean/std, batch)')
+    ap.add_argument('--onnx', required=True, help='ONNX model path')
     ap.add_argument('--datasets', nargs='+', default=['all'],
                     help='subset of: all, {}'.format(', '.join(OFFICIAL_DATASETS)))
     ap.add_argument('--markdown', action='store_true',
                     help='print the results table in Markdown (paste-ready for README/docs)')
     ap.add_argument('opts', nargs=argparse.REMAINDER,
-                    help='extra config overrides in KEY VALUE form')
+                    help='extra config overrides in KEY VALUE form '
+                         '(e.g. ImageNet normalization for torchreid models)')
     args = ap.parse_args()
 
     # opts is REMAINDER: a trailing --markdown lands in it, so recover it here
@@ -89,13 +96,7 @@ def main():
             args.datasets = args.datasets[:index] or ['all']
             break
 
-    weight = sorted(glob.glob(args.weight))
-    if not weight:
-        raise FileNotFoundError('no checkpoint matches {}'.format(args.weight))
-    weight = weight[-1]
-
     cfg.merge_from_file(args.config)
-    cfg.merge_from_list(['MODEL.PRETRAIN_CHOICE', 'none'])
     if args.opts:
         cfg.merge_from_list(args.opts)
     cfg.freeze()
@@ -108,12 +109,12 @@ def main():
         T.Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD),
     ])
 
-    # the classifier head is skipped by load_param, so its size is irrelevant
-    model = make_model(cfg, num_class=751, camera_num=0, view_num=0)
-    model.load_param(weight)
-    model.to('cuda')
+    session = build_session(args.onnx)
+    io_names = (session.get_inputs()[0].name, session.get_outputs()[0].name)
 
-    print('\nmodel  : {}'.format(weight))
+    print('\nmodel  : {}'.format(args.onnx))
+    print('io     : {} -> {}'.format(*io_names))
+    print('pixel  : mean {} / std {}'.format(cfg.INPUT.PIXEL_MEAN, cfg.INPUT.PIXEL_STD))
     if args.markdown:
         print('| dataset | queries | gallery | mAP | R1 | R5 | R10 |')
         print('| --- | ---: | ---: | ---: | ---: | ---: | ---: |')
@@ -127,7 +128,7 @@ def main():
             batch_size=cfg.TEST.IMS_PER_BATCH, shuffle=False,
             num_workers=4, collate_fn=val_collate_fn,
         )
-        feats = extract_features(model, loader)
+        feats = extract_features(session, loader)
         if cfg.TEST.FEAT_NORM == 'yes':
             feats = torch.nn.functional.normalize(feats, dim=1, p=2)
         num_query = len(dataset.query)

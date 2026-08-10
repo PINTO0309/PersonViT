@@ -80,6 +80,11 @@ def main():
                     help='extra config overrides in KEY VALUE form')
     args = ap.parse_args()
 
+    # opts is REMAINDER: a trailing --markdown lands in it, so recover it here
+    if '--markdown' in args.opts:
+        args.opts = [token for token in args.opts if token != '--markdown']
+        args.markdown = True
+
     weight = sorted(glob.glob(args.weight))
     if not weight:
         raise FileNotFoundError('no checkpoint matches {}'.format(args.weight))
