@@ -74,6 +74,8 @@ def main():
     ap.add_argument('--weight', required=True, help='trained checkpoint (glob allowed)')
     ap.add_argument('--mode', choices=('query', 'all'), default='query',
                     help="'query': shift queries only (default); 'all': shift both sides")
+    ap.add_argument('--markdown', action='store_true',
+                    help='print the results table in Markdown (paste-ready for README/docs)')
     ap.add_argument('opts', nargs=argparse.REMAINDER,
                     help='extra config overrides in KEY VALUE form')
     args = ap.parse_args()
@@ -103,7 +105,11 @@ def main():
 
     print('\nmodel  : {}'.format(weight))
     print('mode   : {} shifted'.format('query only' if args.mode == 'query' else 'query+gallery'))
-    print('condition    |    mAP     R1   | dmAP    dR1')
+    if args.markdown:
+        print('| condition | mAP | R1 | dmAP | dR1 |')
+        print('| --- | ---: | ---: | ---: | ---: |')
+    else:
+        print('condition    |    mAP     R1   | dmAP    dR1')
     clean_map = clean_r1 = None
     for name, fn in CONDITIONS.items():
         transforms = build_transforms(fn)
@@ -114,7 +120,13 @@ def main():
                              q_pids, g_pids, q_camids, g_camids)[:2]
         if name == 'clean':
             clean_map, clean_r1 = mAP, cmc[0]
-            print('{:12s} | {:.4f} {:.4f} |    —      —'.format(name, mAP, cmc[0]))
+            if args.markdown:
+                print('| {} | {:.4f} | {:.4f} | — | — |'.format(name, mAP, cmc[0]))
+            else:
+                print('{:12s} | {:.4f} {:.4f} |    —      —'.format(name, mAP, cmc[0]))
+        elif args.markdown:
+            print('| {} | {:.4f} | {:.4f} | {:+.4f} | {:+.4f} |'.format(
+                name, mAP, cmc[0], mAP - clean_map, cmc[0] - clean_r1))
         else:
             print('{:12s} | {:.4f} {:.4f} | {:+.4f} {:+.4f}'.format(
                 name, mAP, cmc[0], mAP - clean_map, cmc[0] - clean_r1))

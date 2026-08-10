@@ -69,6 +69,8 @@ def main():
     ap.add_argument('--weight', required=True, help='trained checkpoint (glob allowed)')
     ap.add_argument('--datasets', nargs='+', default=['all'],
                     choices=['all', *OFFICIAL_DATASETS])
+    ap.add_argument('--markdown', action='store_true',
+                    help='print the results table in Markdown (paste-ready for README/docs)')
     ap.add_argument('opts', nargs=argparse.REMAINDER,
                     help='extra config overrides in KEY VALUE form')
     args = ap.parse_args()
@@ -98,7 +100,11 @@ def main():
     model.to('cuda')
 
     print('\nmodel  : {}'.format(weight))
-    print('dataset  |    #q |     #g |    mAP     R1     R5    R10')
+    if args.markdown:
+        print('| dataset | queries | gallery | mAP | R1 | R5 | R10 |')
+        print('| --- | ---: | ---: | ---: | ---: | ---: | ---: |')
+    else:
+        print('dataset  | queries | gallery |    mAP     R1     R5    R10')
     for name in selected:
         dataset = OFFICIAL_DATASETS[name](root=cfg.DATASETS.ROOT_DIR, verbose=False)
         samples = dataset.query + dataset.gallery
@@ -118,8 +124,12 @@ def main():
         distmat = euclidean_distance(qf, gf)
         cmc, mAP = eval_func(distmat, pids[:num_query], pids[num_query:],
                              camids[:num_query], camids[num_query:])[:2]
-        print('{:8s} | {:5d} | {:6d} | {:.4f} {:.4f} {:.4f} {:.4f}'.format(
-            name, num_query, len(gf), mAP, cmc[0], cmc[4], cmc[9]))
+        if args.markdown:
+            print('| {} | {:,} | {:,} | {:.4f} | {:.4f} | {:.4f} | {:.4f} |'.format(
+                name, num_query, len(gf), mAP, cmc[0], cmc[4], cmc[9]))
+        else:
+            print('{:8s} | {:7,d} | {:7,d} | {:.4f} {:.4f} {:.4f} {:.4f}'.format(
+                name, num_query, len(gf), mAP, cmc[0], cmc[4], cmc[9]))
         del feats, qf, gf, distmat
 
 

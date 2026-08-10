@@ -74,7 +74,6 @@ class MSMT17(BaseImageDataset):
             dataset.append((img_path,  self.pid_begin +pid, camid-1, 1))
             pid_container.add(pid)
             cam_container.add(camid)
-        print(cam_container, 'cam_container')
         # check if pid starts from 0 and increments with 1
         for idx, pid in enumerate(pid_container):
             assert idx == pid, "See code comment for explanation"

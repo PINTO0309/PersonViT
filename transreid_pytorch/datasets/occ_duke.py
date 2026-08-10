@@ -59,7 +59,6 @@ class OCC_DukeMTMCreID(BaseImageDataset):
 
     def _download_data(self):
         if osp.exists(self.dataset_dir):
-            print("This dataset has been downloaded.")
             return
 
         print("Creating directory {}".format(self.dataset_dir))
@@ -104,5 +103,4 @@ class OCC_DukeMTMCreID(BaseImageDataset):
             if relabel: pid = pid2label[pid]
             dataset.append((img_path, self.pid_begin + pid, camid, 1))
             cam_container.add(camid)
-        print(cam_container, 'cam_container')
         return dataset

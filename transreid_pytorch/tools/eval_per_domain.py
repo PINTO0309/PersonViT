@@ -58,6 +58,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--config', required=True)
     ap.add_argument('--weight', required=True, help='trained checkpoint (glob allowed)')
+    ap.add_argument('--markdown', action='store_true',
+                    help='print the results table in Markdown (paste-ready for README/docs)')
     ap.add_argument('opts', nargs=argparse.REMAINDER,
                     help='extra config overrides in KEY VALUE form')
     args = ap.parse_args()
@@ -100,10 +102,14 @@ def main():
 
     print('\nmodel  : {}'.format(weight))
     print('overall: mAP {:.4f}  Rank-1 {:.4f}  Rank-5 {:.4f}  '
-          '({} query / {} gallery)'.format(
+          '({:,} query / {:,} gallery)'.format(
               *evaluate(distmat, q_pids, g_pids, q_camids, g_camids),
               num_query, len(g_pids)))
-    print('domain |    #q |     #g | within: mAP    R1     R5   | merged: mAP    R1     R5')
+    if args.markdown:
+        print('| domain | queries | gallery | within mAP | within R1 | within R5 | merged mAP | merged R1 | merged R5 |')
+        print('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
+    else:
+        print('domain | queries | gallery | within: mAP    R1     R5   | merged: mAP    R1     R5')
     for d in sorted(set(q_doms.tolist())):
         iq = q_doms == d
         ig = g_doms == d
@@ -111,8 +117,12 @@ def main():
             euclidean_distance(qf[torch.as_tensor(iq)], gf[torch.as_tensor(ig)]),
             q_pids[iq], g_pids[ig], q_camids[iq], g_camids[ig])
         merged = evaluate(distmat[iq], q_pids[iq], g_pids, q_camids[iq], g_camids)
-        print('d{:02d}    | {:5d} | {:6d} | {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f}'.format(
-            d, int(iq.sum()), int(ig.sum()), *within, *merged))
+        if args.markdown:
+            print('| d{:02d} | {:,} | {:,} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.4f} |'.format(
+                d, int(iq.sum()), int(ig.sum()), *within, *merged))
+        else:
+            print('d{:02d}    | {:7,d} | {:7,d} | {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f}'.format(
+                d, int(iq.sum()), int(ig.sum()), *within, *merged))
 
 
 if __name__ == '__main__':

@@ -181,7 +181,7 @@ class build_transformer(nn.Module):
         self.feat_dim = cfg.MODEL.FEAT_DIM
         self.dropout_rate = cfg.MODEL.DROPOUT_RATE
 
-        print('using Transformer_type: {} as a backbone'.format(cfg.MODEL.TRANSFORMER_TYPE))
+        print('using backbone: {}'.format(cfg.MODEL.TRANSFORMER_TYPE))
 
         if cfg.MODEL.SIE_CAMERA:
             camera_num = camera_num
@@ -278,7 +278,7 @@ class build_transformer_local(nn.Module):
         self.neck = cfg.MODEL.NECK
         self.neck_feat = cfg.TEST.NECK_FEAT
 
-        print('using Transformer_type: {} as a backbone'.format(cfg.MODEL.TRANSFORMER_TYPE))
+        print('using backbone: {}'.format(cfg.MODEL.TRANSFORMER_TYPE))
 
         if cfg.MODEL.SIE_CAMERA:
             camera_num = camera_num
@@ -473,7 +473,7 @@ def make_model(cfg, num_class, camera_num, view_num):
             print('===========building transformer with JPM module ===========')
         else:
             model = build_transformer(num_class, camera_num, view_num, cfg, __factory_T_type)
-            print('===========building transformer===========')
+            print('===========building {}==========='.format(cfg.MODEL.TRANSFORMER_TYPE))
     else:
         model = Backbone(num_class, cfg)
         print('===========building ResNet===========')
