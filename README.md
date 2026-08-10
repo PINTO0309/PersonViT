@@ -394,6 +394,36 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 - The retired ViT student candidates and their measured results are recorded in [`docs/lightweight_students.md`](docs/lightweight_students.md).
 - B-ain is the teacher of the domain-generalization (`-ain`) ladder   ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance normalization after the patch embedding, trained with the B recipe over 75 epochs (the token-IN insertion costs a few adaptation epochs and, at convergence, 1.2 mAP of in-distribution accuracy versus B — the accepted price of style invariance).
 
+#### B-ain-aug -  ViT-B/16 + token-IN - 86.5M
+
+| dataset | queries | gallery | mAP | R1 | R5 | R10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| market | 3,368 | 15,913 | 0.9793 | 0.9875 | 0.9961 | 0.9982 |
+| msmt17 | 11,659 | 82,161 | 0.8999 | 0.9557 | 0.9804 | 0.9835 |
+| duke_occ | 2,210 | 17,661 | 0.9206 | 0.9471 | 0.9801 | 0.9851 |
+| cuhk03np | 1,400 | 5,332 | 0.9795 | 0.9793 | 0.9907 | 0.9964 |
+| occ_reid | 1,000 | 1,000 | 0.9970 | 1.0000 | 1.0000 | 1.0000 |
+
+#### S-ain-aug -  ViT-S/16 + token-IN - 22.0M
+
+| dataset | queries | gallery | mAP | R1 | R5 | R10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| market | 3,368 | 15,913 | 0.9752 | 0.9857 | 0.9952 | 0.9979 |
+| msmt17 | 11,659 | 82,161 | 0.8886 | 0.9523 | 0.9798 | 0.9829 |
+| duke_occ | 2,210 | 17,661 | 0.9089 | 0.9394 | 0.9774 | 0.9860 |
+| cuhk03np | 1,400 | 5,332 | 0.9766 | 0.9786 | 0.9914 | 0.9971 |
+| occ_reid | 1,000 | 1,000 | 0.9962 | 0.9980 | 1.0000 | 1.0000 |
+
+#### P-ain-aug - OSNet-AIN x1.0 - 2.2M
+
+| dataset | queries | gallery | mAP | R1 | R5 | R10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| market | 3,368 | 15,913 | 0.9642 | 0.9855 | 0.9961 | 0.9979 |
+| msmt17 | 11,659 | 82,161 | 0.8537 | 0.9396 | 0.9756 | 0.9807 |
+| duke_occ | 2,210 | 17,661 | 0.8837 | 0.9226 | 0.9683 | 0.9787 |
+| cuhk03np | 1,400 | 5,332 | 0.9752 | 0.9807 | 0.9936 | 0.9979 |
+| occ_reid | 1,000 | 1,000 | 0.9831 | 0.9850 | 0.9940 | 0.9970 |
+
 #### `-ain` variants vs the standard ladder
 
 Every tier exists (or is planned) in two flavors that share the same training recipe, data and evaluation protocol; the only difference is where the network normalizes:
