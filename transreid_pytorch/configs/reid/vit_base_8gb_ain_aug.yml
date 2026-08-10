@@ -1,0 +1,76 @@
+# Unified reid dataset / photometric-augmentation fine-tune of B-ain / 8 GB GPU
+# Warm-starts from the trained B-ain best (same architecture, all keys load
+# verbatim incl. BNNeck/classifier -> epoch 1 starts at ~92.1 mAP) and adapts
+# it to photometric variation with the recipe validated on the CNN tiers
+# (P/N/T-ain-aug: clean +0.5, mean shift drop cut by ~30%): mild ColorJitter
+# (hue kept tiny) + occasional GaussianBlur, short low-LR schedule. B-ain is
+# the ladder's teacher, so there is no distillation here (it fine-tunes
+# directly, like the original B-ain run). SGD LR scaled to ~0.29x of the
+# parent recipe (2e-4 -> 6e-5), matching the OSNet aug scaling. Plain
+# clean-mAP best selection sufficed on all three CNN aug runs (crossed the
+# warm-start value at ~70% of the schedule); enable SOLVER.VAL_SHIFT only if
+# this run stalls below its warm-start clean mAP. Update PRETRAIN_PATH if a
+# newer B-ain best exists.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_vit_base_8gb_ain/transformer_best_e000055_map0.92092.pth'
+  PRETRAIN_HW_RATIO: 2
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'vit_base_ain_patch16_224_TransReID'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+SOLVER:
+  OPTIMIZER_NAME: 'SGD'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.00006
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 32
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  1e-4
+  WEIGHT_DECAY_BIAS: 1e-4
+  BIAS_LR_FACTOR: 2
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'logs/reid_vit_base_8gb_ain_aug'
