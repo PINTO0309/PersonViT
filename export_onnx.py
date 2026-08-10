@@ -64,10 +64,14 @@ class ReleasedModel:
     output: str
     pretraining_epoch: int
     embedding_dimension: int
-    # "vit" uses the released HF checkpoints and the ViT-specific graph
-    # rewrite; "osnet" uses local unified-dataset checkpoints and the CNN
-    # rewrite path. Both share the fixed-batch-then-rewrite export flow.
+    # "vit" uses the ViT-specific graph rewrite; "osnet" uses the CNN rewrite
+    # path. Both share the fixed-batch-then-rewrite export flow. Checkpoints
+    # come from HF for the released ViT models and from local training logs
+    # whenever the checkpoint path is a glob.
     family: str = "vit"
+    # -ain variants keep InstanceNormalization at inference (it normalizes at
+    # runtime and cannot be folded); the exact node count is pinned here.
+    instance_norm_nodes: int = 0
 
 
 def _released_model(
@@ -156,6 +160,61 @@ UNIFIED_OSNET_MODELS = (
 UNIFIED_OSNET_MODEL_BY_KEY = {model.key: model for model in UNIFIED_OSNET_MODELS}
 
 
+# The photometric-augmentation fine-tunes of the -ain ladder (the current
+# robustness-recommended deployment models). The ViT tiers carry one token-IN
+# InstanceNormalization; OSNet-AIN x1.0 carries five (IN stem + 4 OSBlockINin).
+AIN_AUG_MODELS = (
+    ReleasedModel(
+        key="b-ain-aug",
+        dataset="unified",
+        architecture="ViT-B/16",
+        config="transreid_pytorch/configs/reid/vit_base_8gb_ain_aug.yml",
+        checkpoint=(
+            "transreid_pytorch/logs/reid_vit_base_8gb_ain_aug/"
+            "transformer_best_*.pth"
+        ),
+        output="personvit_vitb16_ain_unified_aug.onnx",
+        pretraining_epoch=260,
+        embedding_dimension=768,
+        instance_norm_nodes=1,
+    ),
+    ReleasedModel(
+        key="s-ain-aug",
+        dataset="unified",
+        architecture="ViT-S/16",
+        config="transreid_pytorch/configs/reid/vit_small_8gb_distill_ain_aug.yml",
+        checkpoint=(
+            "transreid_pytorch/logs/reid_vit_small_8gb_distill_ain_aug/"
+            "transformer_best_*.pth"
+        ),
+        output="personvit_vits16_ain_unified_aug.onnx",
+        pretraining_epoch=220,
+        embedding_dimension=384,
+        instance_norm_nodes=1,
+    ),
+    ReleasedModel(
+        key="p-ain-aug",
+        dataset="unified",
+        architecture="OSNet-AIN x1.0",
+        config="transreid_pytorch/configs/reid/osnet_p_8gb_distill_ain_aug2.yml",
+        checkpoint=(
+            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_aug2/"
+            "transformer_best_*.pth"
+        ),
+        output="osnet_ain_x1_0_p_unified_aug.onnx",
+        pretraining_epoch=0,
+        embedding_dimension=512,
+        family="osnet",
+        instance_norm_nodes=5,
+    ),
+)
+AIN_AUG_MODEL_BY_KEY = {model.key: model for model in AIN_AUG_MODELS}
+
+
+def _uses_local_checkpoint(spec: ReleasedModel) -> bool:
+    return spec.family == "osnet" or "*" in spec.checkpoint
+
+
 class ReIDExportWrapper(nn.Module):
     """Expose the deployment feature and its evaluation-time normalization."""
 
@@ -203,7 +262,7 @@ def resolve_checkpoint(
     cache_dir: Path | None,
     revision: str,
 ) -> Path:
-    if spec.family == "osnet":
+    if _uses_local_checkpoint(spec):
         base = checkpoint_root if checkpoint_root is not None else PROJECT_ROOT
         matches = sorted(base.glob(spec.checkpoint))
         if not matches:
@@ -287,7 +346,9 @@ def set_model_metadata(
         {
             "model_name": spec.key,
             "source_repository": (
-                HF_REPO_ID if spec.family == "vit" else "local unified reid training"
+                "local unified reid training"
+                if _uses_local_checkpoint(spec)
+                else HF_REPO_ID
             ),
             "source_checkpoint": spec.checkpoint,
             "checkpoint_file": checkpoint_path.name,
@@ -1080,6 +1141,15 @@ def validate_osnet_structure(
                 f"{node.name}"
             )
 
+    instance_norm_nodes = [
+        node for node in model.graph.node if node.op_type == "InstanceNormalization"
+    ]
+    if len(instance_norm_nodes) != spec.instance_norm_nodes:
+        raise RuntimeError(
+            f"Expected {spec.instance_norm_nodes} InstanceNormalization nodes "
+            f"for {spec.key}, found {len(instance_norm_nodes)}"
+        )
+
     gemm_nodes = [node for node in model.graph.node if node.op_type == "Gemm"]
     if len(gemm_nodes) != 1:
         raise RuntimeError(
@@ -1336,6 +1406,14 @@ def validate_graph(
             f"Unexpected embedding dimension for {spec.key}: "
             f"{output_dimensions[1].dim_value}"
         )
+    instance_norm_nodes = [
+        node for node in graph.graph.node if node.op_type == "InstanceNormalization"
+    ]
+    if len(instance_norm_nodes) != spec.instance_norm_nodes:
+        raise RuntimeError(
+            f"Expected {spec.instance_norm_nodes} InstanceNormalization nodes "
+            f"for {spec.key}, found {len(instance_norm_nodes)}"
+        )
     if spec.family == "vit":
         validate_reshape_shapes(graph, spec, dynamic_batch=dynamic_batch)
         validate_attention_transposes(
@@ -1591,12 +1669,14 @@ def parse_args() -> argparse.Namespace:
             "unified",
             *RELEASED_MODEL_BY_KEY,
             *UNIFIED_OSNET_MODEL_BY_KEY,
+            *AIN_AUG_MODEL_BY_KEY,
         ],
         default=["all"],
         help=(
             "model keys to export; 'all' selects the eight released ViT models, "
             "'unified' selects every unified-dataset OSNet tier with a trained "
-            "checkpoint, and t/n/p/f/a select individual OSNet tiers"
+            "checkpoint, t/n/p/f/a select individual OSNet tiers, and "
+            "b-ain-aug/s-ain-aug/p-ain-aug select the -ain-aug deployment models"
         ),
     )
     parser.add_argument(
@@ -1650,7 +1730,11 @@ def main() -> None:
             raise FileNotFoundError("No trained unified OSNet checkpoints were found")
         selected_models = tuple(available)
     else:
-        combined = {**RELEASED_MODEL_BY_KEY, **UNIFIED_OSNET_MODEL_BY_KEY}
+        combined = {
+            **RELEASED_MODEL_BY_KEY,
+            **UNIFIED_OSNET_MODEL_BY_KEY,
+            **AIN_AUG_MODEL_BY_KEY,
+        }
         selected_models = tuple(combined[key] for key in args.models)
 
     args.output_dir = args.output_dir.resolve()

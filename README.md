@@ -565,6 +565,25 @@ python export_onnx.py --models unified      # every tier with a trained checkpoi
 python export_onnx.py --models p n          # individual tiers
 ```
 
+### `-ain-aug` deployment models
+
+The robustness-recommended `-ain-aug` fine-tunes export through the same pipeline. Their InstanceNormalization nodes normalize at runtime and cannot be folded, so the structural validation pins the exact node count per model (1 token-IN for the ViT tiers; 5 for OSNet-AIN x1.0 — the IN stem plus four `OSBlockINin` blocks); every remaining BatchNormalization still folds away:
+
+| Model | Backbone | Fixed model | Embedding | IN nodes |
+| --- | --- | --- | ---: | ---: |
+| B-ain-aug | ViT-B/16 + token-IN | `personvit_vitb16_ain_unified_aug.onnx` | 768 | 1 |
+| S-ain-aug | ViT-S/16 + token-IN | `personvit_vits16_ain_unified_aug.onnx` | 384 | 1 |
+| P-ain-aug | OSNet-AIN x1.0 | `osnet_ain_x1_0_p_unified_aug.onnx` | 512 | 5 |
+
+Checkpoints resolve locally from the corresponding
+`transreid_pytorch/logs/.../transformer_best_*.pth` (P-ain-aug uses the
+round-2 `reid_osnet_p_8gb_distill_ain_aug2` best, the weights behind the
+README results row):
+
+```shell
+python export_onnx.py --models b-ain-aug s-ain-aug p-ain-aug
+```
+
 For every checkpoint, the exporter first creates and validates the fixed batch-1
 model. It then derives the `_n.onnx` graph from that model. Every `Reshape`
 target explicitly specifies all non-batch dimensions; zero-copy dimensions are

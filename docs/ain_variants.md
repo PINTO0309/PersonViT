@@ -312,8 +312,13 @@ epochs, and a third round is expected to yield less — round 2 is a cheap
   unlike inference BatchNorm, it normalizes at runtime and **cannot be folded
   into convolutions**. The OSNet-AIN export keeps its IN nodes; all remaining
   BN still folds. Expect a few percent latency overhead vs the BN ladder.
-- `validate_osnet_structure` gets an `-ain` family allowance for
-  InstanceNormalization nodes (count pinned to the architecture definition).
+- Implemented (export_onnx.py): every spec pins its expected
+  InstanceNormalization count (`instance_norm_nodes`, validated on both the
+  fixed and `_n` graphs) — 1 for the token-IN ViT tiers, 5 for OSNet-AIN
+  x1.0. The `-ain-aug` deployment models export as
+  `personvit_unified_vit{b,s}16_ain_aug.onnx` and
+  `osnet_ain_x1_0_p_unified_aug.onnx` via
+  `python export_onnx.py --models b-ain-aug s-ain-aug p-ain-aug`.
 
 ## Cost estimate (RTX 3070 class, sequential)
 
