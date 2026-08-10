@@ -7,9 +7,10 @@
 # Distillation from the style-robust B-ain teacher stays on (its targets are
 # stable under photometric shifts). Update PRETRAIN_PATH if a newer P-ain
 # best exists. Compare against P/P-ain with tools/eval_style_shift.py.
-# SOLVER.VAL_SHIFT selects the best on the mean of clean and warm-shifted
-# query mAP (the best filename records that mean) — plain clean-mAP selection
-# would keep the warm-start epoch as best forever, defeating the fine-tune.
+# Measured outcome: clean mAP passed the warm-start value at epoch 28 and
+# kept improving to the end, so plain clean-mAP best selection works here.
+# SOLVER.VAL_SHIFT (off by default) remains available as an opt-in if a
+# future aug run stalls below its warm-start clean mAP.
 MODEL:
   PRETRAIN_CHOICE: 'self'
   PRETRAIN_PATH: 'logs/reid_osnet_p_8gb_distill_ain/transformer_best_e000100_map0.87020.pth'
@@ -65,7 +66,6 @@ SOLVER:
   WARMUP_EPOCHS: 5
   IMS_PER_BATCH: 64
   WARMUP_METHOD: 'cosine'
-  VAL_SHIFT: 'warm'
   LARGE_FC_LR: False
   SAVE_BEST: True
   LOG_PERIOD: 50

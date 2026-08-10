@@ -171,18 +171,50 @@ epoch 1 starts at ~87 mAP) and fine-tunes with a short low-LR schedule
 criterion: clean mAP roughly held, with the remaining warm/cool/`bright+`
 degradation further reduced in `tools/eval_style_shift.py`.
 
-Two safeguards against the warm-start best-selection trap (epoch 1 scores
-~87 clean mAP before any adaptation, and augmentation is expected to trade
-a little clean mAP for robustness — plain clean-mAP selection could keep
-the unadapted epoch-1 weights as "best" forever):
+Two safeguards exist against the warm-start best-selection trap (epoch 1
+scores ~87 clean mAP before any adaptation, so if augmentation traded clean
+mAP for robustness, plain clean-mAP selection could keep the unadapted
+epoch-1 weights as "best" forever):
 
 - **`SOLVER.VAL_SHIFT`** (e.g. `'warm'`): each eval additionally scores
   style-shifted queries against the clean gallery, and the best model is
-  selected on the **mean of clean and shifted mAP** — the metric the aug
-  run actually optimizes. The best filename records that mean.
+  selected on the **mean of clean and shifted mAP** (the best filename then
+  records that mean). The measured P-ain-aug run cleared its warm-start
+  clean mAP on its own (below), so this stays **off by default** and is an
+  opt-in for aug runs that stall below their warm-start value.
 - **`load_param` accepts resume-format checkpoints** (`checkpoint_last.pth`,
   `'model'` key), so every eval tool can also score the final-epoch model
   directly and compare it against the selected best.
+
+### Measured results (P-ain-aug, 40-epoch fine-tune)
+
+The trap never materialized: clean mAP crossed the warm-start value at
+epoch 28 (~70% of the schedule, the same cosine-tail position as every
+warm-started run) and the best landed on the final epoch at **87.62**
+(+0.6 over P-ain — the fine-tune recovered a fifth of the -ain clean cost,
+helped by P-ain having been undertrained: its best sat on epoch 100/100).
+Style-shift probe, mAP drop per condition:
+
+| Condition | P (BN) | P-ain | P-ain-aug |
+| --- | ---: | ---: | ---: |
+| clean (absolute) | 90.0 | 87.0 | **87.6** |
+| bright+30% | -0.9 | -0.9 | **-0.4** |
+| dark-30% | -1.9 | -0.6 | **-0.2** |
+| contrast-40% | -13.3 | -0.0 | **-0.0** |
+| contrast+40% | -17.0 | -12.0 | **-8.2** |
+| warm | -26.4 | -13.4 | **-8.5** |
+| cool | -10.9 | -7.8 | **-6.4** |
+| gamma0.6 | -6.4 | -2.6 | **-2.1** |
+| gamma1.6 | -5.4 | -3.6 | **-2.8** |
+| **mean** | **-10.3** | **-5.1** | **-3.6** |
+
+P-ain-aug strictly dominates P-ain: clean up, every shift condition up,
+and the architecture's exact-zero invariance (contrast-40%) preserved.
+The augmentation attacked exactly the residues -ain cannot remove —
+the two worst conditions (warm -13.4 -> -8.5, contrast+40% -12.0 -> -8.2)
+shrank by ~30-40%, and under warm the model scores 79.2 absolute vs 63.7
+for BN-P. The recipe (mild jitter, hue<=0.02, warm-start, low-LR 40
+epochs, B-ain teacher) is validated for rollout to the other tiers.
 
 ## Export and deployment notes
 
