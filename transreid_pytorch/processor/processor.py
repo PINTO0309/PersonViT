@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from utils.meter import AverageMeter
-from utils.metrics import R1_mAP_eval
+from utils.metrics import R1_mAP_eval, euclidean_distance, eval_func
 from torch import amp
 import torch.distributed as dist
 
@@ -73,6 +73,25 @@ def save_best_model(cfg, model, epoch, mAP, best_path, logger):
     return new_best
 
 
+def _shifted_query_map(model, loader, evaluator, gf, device):
+    """mAP of style-shifted queries against the clean-gallery features `gf`
+    of the evaluation that just ran (gf is already feat-normalized whenever
+    the evaluator normalized)."""
+    feats = []
+    with torch.no_grad():
+        for img, pid, camid, camids, target_view, _ in loader:
+            feat = model(img.to(device), cam_label=camids.to(device),
+                         view_label=target_view.to(device))
+            feats.append(feat.detach().cpu())
+    qf = torch.cat(feats, dim=0)
+    if evaluator.feat_norm:
+        qf = torch.nn.functional.normalize(qf, dim=1, p=2)
+    n = evaluator.num_query
+    return eval_func(euclidean_distance(qf, gf),
+                     np.asarray(evaluator.pids[:n]), np.asarray(evaluator.pids[n:]),
+                     np.asarray(evaluator.camids[:n]), np.asarray(evaluator.camids[n:]))[1]
+
+
 def do_train(cfg,
              model,
              center_criterion,
@@ -116,6 +135,22 @@ def do_train(cfg,
 
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     scaler = amp.GradScaler('cuda')
+
+    val_shift_loader = None
+    if cfg.SOLVER.VAL_SHIFT:
+        if cfg.MODEL.DIST_TRAIN:
+            raise NotImplementedError('SOLVER.VAL_SHIFT supports single-GPU training only')
+        from torch.utils.data import DataLoader
+        from datasets.bases import ImageDataset
+        from datasets.make_dataloader import val_collate_fn
+        from datasets.style_shift import build_shift_val_transforms
+        val_shift_loader = DataLoader(
+            ImageDataset(val_loader.dataset.dataset[:num_query],
+                         build_shift_val_transforms(cfg, cfg.SOLVER.VAL_SHIFT)),
+            batch_size=cfg.TEST.IMS_PER_BATCH, shuffle=False,
+            num_workers=cfg.DATALOADER.NUM_WORKERS, collate_fn=val_collate_fn)
+        logger.info('shift-aware validation enabled: best selected on mean of '
+                    'clean and {!r}-shifted query mAP'.format(cfg.SOLVER.VAL_SHIFT))
 
     start_epoch = 1
     best_map = 0.0
@@ -231,14 +266,20 @@ def do_train(cfg,
                         target_view = target_view.to(device)
                         feat = model(img, cam_label=camids, view_label=target_view)
                         evaluator.update((feat, vid, camid))
-                cmc, mAP, _, _, _, _, _ = evaluator.compute()
+                cmc, mAP, _, _, _, _, gf = evaluator.compute()
                 logger.info("Validation Results - Epoch: {}".format(epoch))
                 logger.info("mAP: {:.1%}".format(mAP))
                 for r in [1, 5, 10]:
                     logger.info("CMC curve, Rank-{:<3}:{:.1%}".format(r, cmc[r - 1]))
-                if cfg.SOLVER.SAVE_BEST and mAP > best_map:
-                    best_map = mAP
-                    best_path = save_best_model(cfg, model, epoch, mAP, best_path, logger)
+                selection = mAP
+                if val_shift_loader is not None:
+                    shift_map = _shifted_query_map(model, val_shift_loader, evaluator, gf, device)
+                    selection = 0.5 * (mAP + shift_map)
+                    logger.info("Shifted-query ({}) mAP: {:.1%}; selection metric (mean): {:.1%}".format(
+                        cfg.SOLVER.VAL_SHIFT, shift_map, selection))
+                if cfg.SOLVER.SAVE_BEST and selection > best_map:
+                    best_map = selection
+                    best_path = save_best_model(cfg, model, epoch, selection, best_path, logger)
                 torch.cuda.empty_cache()
 
         if not cfg.MODEL.DIST_TRAIN or dist.get_rank() == 0:

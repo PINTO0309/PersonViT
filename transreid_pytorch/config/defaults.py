@@ -192,6 +192,12 @@ _C.SOLVER.WARMUP_FACTOR = 0.01
 _C.SOLVER.WARMUP_EPOCHS = 5
 # method of warm up, option: 'constant','linear'
 _C.SOLVER.WARMUP_METHOD = "cosine"
+# Shift-aware validation: name of a datasets/style_shift.py condition (e.g.
+# 'warm'). When set, each eval additionally scores style-shifted queries
+# against the clean gallery, and the best model is selected on the mean of
+# clean and shifted mAP instead of clean mAP alone. Meant for augmentation
+# fine-tunes, where clean mAP alone would keep the warm-start epoch as best.
+_C.SOLVER.VAL_SHIFT = ''
 
 _C.SOLVER.COSINE_MARGIN = 0.5
 _C.SOLVER.COSINE_SCALE = 30

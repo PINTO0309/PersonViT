@@ -144,7 +144,9 @@ class Backbone(nn.Module):
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path, weights_only=False)
-        if 'state_dict' in param_dict:
+        if 'model' in param_dict:
+            param_dict = param_dict['model']  # resume-format checkpoint (checkpoint_last.pth)
+        elif 'state_dict' in param_dict:
             param_dict = param_dict['state_dict']
         for i in param_dict:
             if 'classifier' in i:
@@ -255,6 +257,10 @@ class build_transformer(nn.Module):
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path, map_location = 'cpu', weights_only=False)
+        if 'model' in param_dict:
+            param_dict = param_dict['model']  # resume-format checkpoint (checkpoint_last.pth)
+        elif 'state_dict' in param_dict:
+            param_dict = param_dict['state_dict']
         for i in param_dict:
             try:
                 self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
@@ -422,6 +428,10 @@ class build_transformer_local(nn.Module):
 
     def load_param(self, trained_path):
         param_dict = torch.load(trained_path, weights_only=False)
+        if 'model' in param_dict:
+            param_dict = param_dict['model']  # resume-format checkpoint (checkpoint_last.pth)
+        elif 'state_dict' in param_dict:
+            param_dict = param_dict['state_dict']
         for i in param_dict:
             self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
         print('Loading pretrained model from {}'.format(trained_path))

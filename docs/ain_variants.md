@@ -171,6 +171,19 @@ epoch 1 starts at ~87 mAP) and fine-tunes with a short low-LR schedule
 criterion: clean mAP roughly held, with the remaining warm/cool/`bright+`
 degradation further reduced in `tools/eval_style_shift.py`.
 
+Two safeguards against the warm-start best-selection trap (epoch 1 scores
+~87 clean mAP before any adaptation, and augmentation is expected to trade
+a little clean mAP for robustness — plain clean-mAP selection could keep
+the unadapted epoch-1 weights as "best" forever):
+
+- **`SOLVER.VAL_SHIFT`** (e.g. `'warm'`): each eval additionally scores
+  style-shifted queries against the clean gallery, and the best model is
+  selected on the **mean of clean and shifted mAP** — the metric the aug
+  run actually optimizes. The best filename records that mean.
+- **`load_param` accepts resume-format checkpoints** (`checkpoint_last.pth`,
+  `'model'` key), so every eval tool can also score the final-epoch model
+  directly and compare it against the selected best.
+
 ## Export and deployment notes
 
 - InstanceNormalization is a standard ONNX op (ORT/TensorRT supported) but,
