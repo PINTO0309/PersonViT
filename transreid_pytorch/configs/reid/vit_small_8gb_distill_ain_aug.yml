@@ -4,9 +4,10 @@
 # it to photometric variation with the recipe validated on the CNN tiers
 # (P/N/T-ain-aug: clean +0.5, mean shift drop cut by ~30%): mild ColorJitter
 # (hue kept tiny) + occasional GaussianBlur, short low-LR schedule.
-# Distillation from the style-robust B-ain teacher stays on (its targets are
-# stable under photometric shifts). SGD LR scaled to ~0.29x of the parent
-# recipe (4e-4 -> 1.2e-4), matching the OSNet aug scaling. Plain clean-mAP
+# Distillation stays on, upgraded to the B-ain-aug teacher (92.26 clean,
+# itself adapted to the augmented input distribution, so its targets are the
+# most stable available under the jittered batches). SGD LR scaled to ~0.29x
+# of the parent recipe (4e-4 -> 1.2e-4), matching the OSNet aug scaling. Plain clean-mAP
 # best selection sufficed on all three CNN aug runs; enable SOLVER.VAL_SHIFT
 # only if this run stalls below its warm-start clean mAP. Update
 # PRETRAIN_PATH if a newer S-ain best exists.
@@ -51,8 +52,8 @@ DATALOADER:
 
 DISTILL:
   ENABLED: True
-  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain.yml'
-  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain/transformer_best_*.pth'
+  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_aug.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_aug/transformer_best_*.pth'
   LOGIT_WEIGHT: 1.0
   REL_WEIGHT: 30.0
   EMBED_WEIGHT: 0.0

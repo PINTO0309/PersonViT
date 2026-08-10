@@ -254,6 +254,28 @@ shift drops 3.6 / 3.8 / 4.0 — the aug fine-tune lifts every tier by
 roughly the same amount, so the tier ordering (and the x1.25 sweet spot,
 with T-ain-aug only +0.2 over N-ain-aug for +42% FLOPs) is unchanged.
 
+### B-ain-aug: the teacher itself
+
+The same recipe on the teacher (SGD 6e-5, no distillation, crossed its
+warm-start value already at epoch 15, best e37):
+
+| Metric | B (BN) | B-ain | B-ain-aug |
+| --- | ---: | ---: | ---: |
+| clean mAP | 93.3 | 92.1 | **92.3** |
+| mean mAP drop over the 8 shifts | -5.2 | -3.4 | **-1.8** |
+| warm (worst) absolute mAP | 69.7 | 74.3 | **84.7** |
+
+The clean gain (+0.17) is smaller than the CNN tiers' (+0.5) — token-IN
+already removes what mild augmentation teaches best, and B-ain was less
+undertrained — but the robustness gain is the largest measured: warm
+degradation drops from -17.9 to **-7.5** (absolute 84.7, +15.0 over BN-B)
+and the mean drop nearly halves to 1.8, while both exact-zero conditions
+(dark-30%, contrast-40%) are preserved. B-ain-aug also brings the clean
+score within 0.05 of the original non-inferiority gate (92.31). As the
+strongest and most style-stable model, it replaces B-ain as the teacher
+for subsequent aug distillations (S-ain-aug and optional round-2 CNN
+fine-tunes).
+
 ## Export and deployment notes
 
 - InstanceNormalization is a standard ONNX op (ORT/TensorRT supported) but,
