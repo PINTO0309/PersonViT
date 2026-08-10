@@ -106,6 +106,10 @@ Measured on the four completed BN/-ain pairs:
 | N / N-ain | -2.7 | 10.9 -> **5.8 (halved)** | 65.3 -> **71.9** |
 | P / P-ain | -3.0 | 10.3 -> **5.1 (halved)** | 63.7 -> **73.7** |
 
+T-ain (whose BN sibling was never trained) probes in line with the other
+CNN -ain tiers: mean drop 5.6, worst shift (warm) 74.0 absolute, and the
+exact-zero `contrast-40%` invariance preserved.
+
 Key findings:
 
 1. **Exact-zero degradation confirmed**: the -ain models lose exactly 0.0000
