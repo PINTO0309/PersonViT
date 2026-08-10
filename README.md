@@ -374,7 +374,7 @@ smaller student.
 
 ### Results on the unified test set
 
-Best checkpoints per variant, evaluated on the unified test split.
+Best checkpoints per variant, evaluated on the unified test split. `-aug` indicates that photometric augmentation fine-tuning was performed.
 
 | Var | Backbone | Params | GFLOPs<br>@256x128 | Emb | mAP | Rank-1 | Rank-5 | Rank-10 |
 | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
@@ -385,9 +385,9 @@ Best checkpoints per variant, evaluated on the unified test split.
 | T-ain | OSNet-AIN x1.5 | 4.6M | 2.12 | 512 | 88.0 | 94.8 | 97.4 | 98.1 |
 | N-ain | OSNet-AIN x1.25 | 3.3M | 1.49 | 512 | 87.9 | 94.9 | 97.3 | 98.0 |
 | P-ain | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 87.0 | 94.1 | 97.2 | 97.9 |
-| T-ain-aug | OSNet-AIN x1.5 (photometric-aug fine-tune of T-ain) | 4.6M | 2.12 | 512 | 88.5 | 94.9 | 97.1 | 97.8 |
-| N-ain-aug | OSNet-AIN x1.25 (photometric-aug fine-tune of N-ain) | 3.3M | 1.49 | 512 | 88.3 | 95.0 | 97.3 | 98.0 |
-| P-ain-aug | OSNet-AIN x1.0 (photometric-aug fine-tune of P-ain) | 2.2M | 0.98 | 512 | 87.6 | 94.5 | 97.2 | 98.0 |
+| T-ain-aug | OSNet-AIN x1.5 | 4.6M | 2.12 | 512 | 88.5 | 94.9 | 97.1 | 97.8 |
+| N-ain-aug | OSNet-AIN x1.25 | 3.3M | 1.49 | 512 | 88.3 | 95.0 | 97.3 | 98.0 |
+| P-ain-aug | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 87.6 | 94.5 | 97.2 | 98.0 |
 
 - The retired ViT student candidates and their measured results are recorded in [`docs/lightweight_students.md`](docs/lightweight_students.md).
 - B-ain is the teacher of the domain-generalization (`-ain`) ladder   ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance normalization after the patch embedding, trained with the B recipe over 75 epochs (the token-IN insertion costs a few adaptation epochs and, at convergence, 1.2 mAP of in-distribution accuracy versus B — the accepted price of style invariance).
