@@ -44,11 +44,23 @@ def val_collate_fn(batch):
     return torch.stack(imgs, dim=0), pids, camids, camids_batch, viewids, img_paths
 
 def make_dataloader(cfg):
+    photometric = []
+    if cfg.INPUT.CJ_PROB > 0:
+        photometric.append(T.RandomApply([T.ColorJitter(
+            brightness=cfg.INPUT.CJ_BRIGHTNESS, contrast=cfg.INPUT.CJ_CONTRAST,
+            saturation=cfg.INPUT.CJ_SATURATION, hue=cfg.INPUT.CJ_HUE,
+        )], p=cfg.INPUT.CJ_PROB))
+    if cfg.INPUT.BLUR_PROB > 0:
+        photometric.append(T.RandomApply(
+            [T.GaussianBlur(5, sigma=tuple(cfg.INPUT.BLUR_SIGMA))],
+            p=cfg.INPUT.BLUR_PROB))
+
     train_transforms = T.Compose([
             T.Resize(cfg.INPUT.SIZE_TRAIN, interpolation=3),
             T.RandomHorizontalFlip(p=cfg.INPUT.PROB),
             T.Pad(cfg.INPUT.PADDING),
             T.RandomCrop(cfg.INPUT.SIZE_TRAIN),
+            *photometric,
             T.ToTensor(),
             T.Normalize(mean=cfg.INPUT.PIXEL_MEAN, std=cfg.INPUT.PIXEL_STD),
             RandomErasing(probability=cfg.INPUT.RE_PROB, mode='pixel', max_count=1, device='cpu'),

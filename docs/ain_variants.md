@@ -146,6 +146,31 @@ reproduces its source's outputs to 0.0 at initialization (verified) and the
 new blocks are recruited through their BN scales during training. Recipes
 are unchanged (Adam 3.5e-4, wd 5e-4, 100 epochs, B-ain teacher).
 
+## Photometric augmentation fine-tune (X-ain-aug)
+
+The style-shift probe showed what -ain cannot remove by construction:
+clipping-induced non-affinity (`bright+30%`) and the residual of
+channel-selective color shifts (warm/cool). Photometric augmentation is the
+complementary, data-side fix for exactly those gaps, and it composes well
+with this ladder: the B-ain teacher is style-robust, so its distillation
+targets stay stable under the distorted inputs.
+
+Implementation (config-gated, default off — existing recipes unchanged):
+
+- `INPUT.CJ_PROB` applies a mild ColorJitter (brightness 0.2, contrast 0.3,
+  saturation 0.2, **hue 0.02** — color is a primary ReID cue, so large hue
+  shifts or the channel permutation of `RandomPhotometricDistort` are
+  deliberately excluded).
+- `INPUT.BLUR_PROB` applies GaussianBlur (kernel 5, sigma from
+  `INPUT.BLUR_SIGMA`) for cross-camera focus/resolution variation.
+
+`osnet_p_8gb_distill_ain_aug.yml` is the probe experiment: it warm-starts
+from the trained P-ain best (same architecture — every key loads verbatim,
+epoch 1 starts at ~87 mAP) and fine-tunes with a short low-LR schedule
+(Adam 1e-4, 40 epochs) so the only variable is the augmentation. Success
+criterion: clean mAP roughly held, with the remaining warm/cool/`bright+`
+degradation further reduced in `tools/eval_style_shift.py`.
+
 ## Export and deployment notes
 
 - InstanceNormalization is a standard ONNX op (ORT/TensorRT supported) but,

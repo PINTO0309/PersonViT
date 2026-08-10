@@ -93,6 +93,18 @@ _C.INPUT.PIXEL_MEAN = [0.485, 0.456, 0.406]
 _C.INPUT.PIXEL_STD = [0.229, 0.224, 0.225]
 # Value of padding size
 _C.INPUT.PADDING = 10
+# Photometric augmentation (off by default to keep existing recipes intact).
+# Probability of applying ColorJitter; hue is kept small on purpose — color is
+# a primary discriminative cue in ReID, so large hue shifts (or channel
+# permutations a la RandomPhotometricDistort) are harmful
+_C.INPUT.CJ_PROB = 0.0
+_C.INPUT.CJ_BRIGHTNESS = 0.2
+_C.INPUT.CJ_CONTRAST = 0.3
+_C.INPUT.CJ_SATURATION = 0.2
+_C.INPUT.CJ_HUE = 0.02
+# Probability of applying GaussianBlur (kernel 5) with sigma drawn from BLUR_SIGMA
+_C.INPUT.BLUR_PROB = 0.0
+_C.INPUT.BLUR_SIGMA = [0.1, 2.0]
 
 # -----------------------------------------------------------------------------
 # Dataset
