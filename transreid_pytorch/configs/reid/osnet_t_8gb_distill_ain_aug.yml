@@ -6,13 +6,10 @@
 # short low-LR schedule, B-ain teacher distillation kept on. Plain clean-mAP
 # best selection sufficed on P-ain-aug; enable SOLVER.VAL_SHIFT only if this
 # run stalls below its warm-start clean mAP.
-#
-# NOTE: requires the T-ain run to have finished. PRETRAIN_PATH below is a
-# placeholder — replace it with the actual T-ain best filename, e.g.:
-#   ls logs/reid_osnet_t_8gb_distill_ain/transformer_best_*.pth
+# Update PRETRAIN_PATH if a newer T-ain best exists.
 MODEL:
   PRETRAIN_CHOICE: 'self'
-  PRETRAIN_PATH: 'logs/reid_osnet_t_8gb_distill_ain/transformer_best_REPLACE_WITH_ACTUAL_FILENAME.pth'
+  PRETRAIN_PATH: 'logs/reid_osnet_t_8gb_distill_ain/transformer_best_e000098_map0.88013.pth'
   PRETRAIN_HW_RATIO: 1
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'

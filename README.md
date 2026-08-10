@@ -384,6 +384,7 @@ Best checkpoints per variant, evaluated on the unified test split.
 | P | OSNet x1.0 | 2.2M | 0.98 | 512 | 90.0 | 96.1 | 97.8 | 98.4 |
 | B-ain | ViT-B/16 + token-IN | 86.5M | 11.35 | 768 | 92.1 | 96.5 | 97.8 | 98.2 |
 | S-ain | ViT-S/16 + token-IN | 22.0M | 2.94 | 384 | 91.4 | 96.3 | 97.9 | 98.4 |
+| T-ain | OSNet-AIN x1.5 | 4.6M | 2.12 | 512 | 88.0 | 94.8 | 97.4 | 98.1 |
 | N-ain | OSNet-AIN x1.25 | 3.3M | 1.49 | 512 | 87.9 | 94.9 | 97.3 | 98.0 |
 | P-ain | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 87.0 | 94.1 | 97.2 | 97.9 |
 | P-ain-aug | OSNet-AIN x1.0 (photometric-aug fine-tune of P-ain) | 2.2M | 0.98 | 512 | 87.6 | 94.5 | 97.2 | 98.0 |
