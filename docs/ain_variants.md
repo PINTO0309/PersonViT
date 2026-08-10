@@ -276,6 +276,25 @@ strongest and most style-stable model, it replaces B-ain as the teacher
 for subsequent aug distillations (S-ain-aug and optional round-2 CNN
 fine-tunes).
 
+### S-ain-aug completes the aug ladder
+
+First run distilled from the B-ain-aug teacher (crossed at epoch 13, best
+e34 at 91.63, +0.24 over S-ain): mean drop 3.9 -> **2.2**, warm degradation
+-21.3 -> **-9.7** (absolute 82.0, +12.5 over BN-S), both exact-zero
+conditions preserved. The full aug ladder, measured:
+
+| | B-ain-aug | S-ain-aug | T-ain-aug | N-ain-aug | P-ain-aug |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| clean mAP | 92.3 | 91.6 | 88.5 | 88.3 | 87.6 |
+| mean mAP drop over the 8 shifts | -1.8 | -2.2 | -4.0 | -3.8 | -3.6 |
+| warm (worst) absolute mAP | 84.7 | 82.0 | 78.3 | 77.8 | 73.7 |
+
+Every tier gained clean accuracy and lost half or more of its residual
+style sensitivity relative to its -ain parent; the ViT tiers converge
+faster (crossing at ~1/3 of the schedule vs ~70% for the CNNs) and end
+up markedly more robust, consistent with token-IN's exact affine
+invariance leaving less for augmentation to fix.
+
 ## Export and deployment notes
 
 - InstanceNormalization is a standard ONNX op (ORT/TensorRT supported) but,
