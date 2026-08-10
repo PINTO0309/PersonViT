@@ -306,6 +306,12 @@ The gain cannot be attributed between the better teacher and the extra 40
 epochs, and a third round is expected to yield less — round 2 is a cheap
 "+0.2 clean for 2.5 GPU-hours" option per CNN tier, not a new lever.
 
+N-ain-aug2 confirms with a smaller margin: clean 88.34 -> **88.44** (+0.09,
+crossed at epoch 33, best e38), robustness flat (mean drop 3.8 -> 3.8,
+per-condition absolutes within +-0.3, exact-zero `contrast-40%` preserved).
+The closer a tier already sits to its capacity ceiling, the less round 2
+returns; the README rows carry the round-2 numbers.
+
 ## Export and deployment notes
 
 - InstanceNormalization is a standard ONNX op (ORT/TensorRT supported) but,
