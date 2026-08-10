@@ -306,11 +306,13 @@ The gain cannot be attributed between the better teacher and the extra 40
 epochs, and a third round is expected to yield less — round 2 is a cheap
 "+0.2 clean for 2.5 GPU-hours" option per CNN tier, not a new lever.
 
-N-ain-aug2 confirms with a smaller margin: clean 88.34 -> **88.44** (+0.09,
-crossed at epoch 33, best e38), robustness flat (mean drop 3.8 -> 3.8,
-per-condition absolutes within +-0.3, exact-zero `contrast-40%` preserved).
-The closer a tier already sits to its capacity ceiling, the less round 2
-returns; the README rows carry the round-2 numbers.
+N-ain-aug2 and T-ain-aug2 confirm with smaller margins: clean
+88.34 -> **88.44** (N) and 88.52 -> **88.61** (T), both +0.09 with
+robustness flat-to-slightly-better (N mean drop 3.8 -> 3.8, T 4.0 -> 3.9;
+exact-zero `contrast-40%` preserved everywhere). The closer a tier already
+sits to its capacity ceiling, the less round 2 returns; the README rows
+carry the round-2 numbers. Round 3 is not planned — the P/N/T trend
+(+0.18/+0.09/+0.09) extrapolates below the noise floor.
 
 ## Export and deployment notes
 
@@ -321,10 +323,11 @@ returns; the README rows carry the round-2 numbers.
 - Implemented (export_onnx.py): every spec pins its expected
   InstanceNormalization count (`instance_norm_nodes`, validated on both the
   fixed and `_n` graphs) — 1 for the token-IN ViT tiers, 5 for OSNet-AIN
-  x1.0. The `-ain-aug` deployment models export as
-  `personvit_unified_vit{b,s}16_ain_aug.onnx` and
-  `osnet_ain_x1_0_p_unified_aug.onnx` via
-  `python export_onnx.py --models b-ain-aug s-ain-aug p-ain-aug`.
+  x1.0/x1.25/x1.5. The `-ain-aug` deployment models export as
+  `personvit_vit{b,s}16_ain_unified_aug.onnx` and
+  `osnet_ain_<multiplier>_<tier>_unified_aug.onnx` via
+  `python export_onnx.py --models b-ain-aug s-ain-aug t-ain-aug n-ain-aug
+  p-ain-aug` (CNN tiers use the round-2 bests).
 
 ## Cost estimate (RTX 3070 class, sequential)
 

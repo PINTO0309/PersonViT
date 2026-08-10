@@ -207,6 +207,36 @@ AIN_AUG_MODELS = (
         family="osnet",
         instance_norm_nodes=5,
     ),
+    ReleasedModel(
+        key="n-ain-aug",
+        dataset="unified",
+        architecture="OSNet-AIN x1.25",
+        config="transreid_pytorch/configs/reid/osnet_n_8gb_distill_ain_aug2.yml",
+        checkpoint=(
+            "transreid_pytorch/logs/reid_osnet_n_8gb_distill_ain_aug2/"
+            "transformer_best_*.pth"
+        ),
+        output="osnet_ain_x1_25_n_unified_aug.onnx",
+        pretraining_epoch=0,
+        embedding_dimension=512,
+        family="osnet",
+        instance_norm_nodes=5,
+    ),
+    ReleasedModel(
+        key="t-ain-aug",
+        dataset="unified",
+        architecture="OSNet-AIN x1.5",
+        config="transreid_pytorch/configs/reid/osnet_t_8gb_distill_ain_aug2.yml",
+        checkpoint=(
+            "transreid_pytorch/logs/reid_osnet_t_8gb_distill_ain_aug2/"
+            "transformer_best_*.pth"
+        ),
+        output="osnet_ain_x1_5_t_unified_aug.onnx",
+        pretraining_epoch=0,
+        embedding_dimension=512,
+        family="osnet",
+        instance_norm_nodes=5,
+    ),
 )
 AIN_AUG_MODEL_BY_KEY = {model.key: model for model in AIN_AUG_MODELS}
 

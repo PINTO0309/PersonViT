@@ -387,7 +387,7 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 | P-ain | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 87.0 | 94.1 | 97.2 | 97.9 |
 | B-ain-aug | ViT-B/16<br>+<br>token-IN | 86.5M | 11.35 | 768 | 92.3 | 96.6 | 97.9 | 98.3 |
 | S-ain-aug | ViT-S/16<br>+<br>token-IN | 22.0M | 2.94 | 384 | 91.6 | 96.6 | 98.1 | 98.5 |
-| T-ain-aug | OSNet-AIN x1.5 | 4.6M | 2.12 | 512 | 88.5 | 94.9 | 97.1 | 97.8 |
+| T-ain-aug | OSNet-AIN x1.5 | 4.6M | 2.12 | 512 | 88.6 | 94.8 | 97.2 | 97.9 |
 | N-ain-aug | OSNet-AIN x1.25 | 3.3M | 1.49 | 512 | 88.4 | 95.0 | 97.3 | 98.0 |
 | P-ain-aug | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 87.8 | 94.7 | 97.2 | 98.0 |
 
@@ -414,7 +414,17 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 | cuhk03np | 1,400 | 5,332 | 0.9766 | 0.9786 | 0.9914 | 0.9971 |
 | occ_reid | 1,000 | 1,000 | 0.9962 | 0.9980 | 1.0000 | 1.0000 |
 
-#### N-ain-aug - OSNet-AIN x1.0 - 3.3M
+#### T-ain-aug - OSNet-AIN x1.5 - 4.6M
+
+| dataset | queries | gallery | mAP | R1 | R5 | R10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| market | 3,368 | 15,913 | 0.9684 | 0.9846 | 0.9958 | 0.9976 |
+| msmt17 | 11,659 | 82,161 | 0.8669 | 0.9448 | 0.9744 | 0.9799 |
+| duke_occ | 2,210 | 17,661 | 0.9031 | 0.9357 | 0.9747 | 0.9810 |
+| cuhk03np | 1,400 | 5,332 | 0.9776 | 0.9814 | 0.9936 | 0.9986 |
+| occ_reid | 1,000 | 1,000 | 0.9791 | 0.9840 | 0.9890 | 0.9980 |
+
+#### N-ain-aug - OSNet-AIN x1.25 - 3.3M
 
 | dataset | queries | gallery | mAP | R1 | R5 | R10 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -443,7 +453,7 @@ Every tier exists (or is planned) in two flavors that share the same training re
 | Normalization | BatchNorm (CNN) / LayerNorm (ViT) only | Adds instance normalization at style-sensitive early positions: token-axis IN after the ViT patch embedding; the searched OSNet-AIN placement (IN stem + four IN blocks) for CNN tiers |
 | What the IN does | — | Removes each image's own style statistics (illumination, color cast, camera tone) from the features at inference time |
 | In-distribution accuracy | Highest on the unified test set | Slightly lower by design |
-| Unseen-environment robustness | Sensitive to camera/style shift; BatchNorm also carries training-set statistics into deployment | Style-invariant features and per-sample normalization — measured with the style-shift probe (`tools/eval_style_shift.py`, shifted queries vs clean gallery): mean mAP drop over 8 photometric shifts falls from 5.2 to 3.4 (B pair), 5.3 to 3.9 (S pair), 10.9 to 5.8 (N pair) and 10.3 to 5.1 (P pair), with exact-zero degradation under uniform gain/contrast shifts; under the hardest shift the `-ain` models beat their BN siblings in absolute mAP despite the lower clean score; photometric-augmentation fine-tunes (`*-ain-aug`, `INPUT.CJ_PROB`/`INPUT.BLUR_PROB`) further cut the mean drop (B: 1.8, S: 2.2, P: 3.5, N: 3.8, T: 4.0) while also raising clean mAP (B: 92.3, S: 91.6, P: 87.8, N: 88.4, T: 88.5) |
+| Unseen-environment robustness | Sensitive to camera/style shift; BatchNorm also carries training-set statistics into deployment | Style-invariant features and per-sample normalization — measured with the style-shift probe (`tools/eval_style_shift.py`, shifted queries vs clean gallery): mean mAP drop over 8 photometric shifts falls from 5.2 to 3.4 (B pair), 5.3 to 3.9 (S pair), 10.9 to 5.8 (N pair) and 10.3 to 5.1 (P pair), with exact-zero degradation under uniform gain/contrast shifts; under the hardest shift the `-ain` models beat their BN siblings in absolute mAP despite the lower clean score; photometric-augmentation fine-tunes (`*-ain-aug`, `INPUT.CJ_PROB`/`INPUT.BLUR_PROB`) further cut the mean drop (B: 1.8, S: 2.2, P: 3.5, N: 3.8, T: 3.9) while also raising clean mAP (B: 92.3, S: 91.6, P: 87.8, N: 88.4, T: 88.6) |
 | Teacher for distilled tiers | B | B-ain |
 | ONNX | BatchNorm folds away entirely | InstanceNormalization nodes remain (runtime normalization; ViT: 1 node, OSNet: 5) with a small latency overhead |
 
@@ -583,15 +593,17 @@ The robustness-recommended `-ain-aug` fine-tunes export through the same pipelin
 | --- | --- | --- | ---: | ---: |
 | B-ain-aug | ViT-B/16 + token-IN | `personvit_vitb16_ain_unified_aug.onnx` | 768 | 1 |
 | S-ain-aug | ViT-S/16 + token-IN | `personvit_vits16_ain_unified_aug.onnx` | 384 | 1 |
+| T-ain-aug | OSNet-AIN x1.5 | `osnet_ain_x1_5_t_unified_aug.onnx` | 512 | 5 |
+| N-ain-aug | OSNet-AIN x1.25 | `osnet_ain_x1_25_n_unified_aug.onnx` | 512 | 5 |
 | P-ain-aug | OSNet-AIN x1.0 | `osnet_ain_x1_0_p_unified_aug.onnx` | 512 | 5 |
 
 Checkpoints resolve locally from the corresponding
-`transreid_pytorch/logs/.../transformer_best_*.pth` (P-ain-aug uses the
-round-2 `reid_osnet_p_8gb_distill_ain_aug2` best, the weights behind the
-README results row):
+`transreid_pytorch/logs/.../transformer_best_*.pth` (the CNN tiers use the
+round-2 `reid_osnet_*_8gb_distill_ain_aug2` bests, the weights behind the
+README results rows):
 
 ```shell
-python export_onnx.py --models b-ain-aug s-ain-aug p-ain-aug
+python export_onnx.py --models b-ain-aug s-ain-aug t-ain-aug n-ain-aug p-ain-aug
 ```
 
 For every checkpoint, the exporter first creates and validates the fixed batch-1
