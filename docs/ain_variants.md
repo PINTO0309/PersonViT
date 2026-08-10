@@ -220,6 +220,24 @@ shrank by ~30-40%, and under warm the model scores 79.2 absolute vs 63.7
 for BN-P. The recipe (mild jitter, hue<=0.02, warm-start, low-LR 40
 epochs, B-ain teacher) is validated for rollout to the other tiers.
 
+### N-ain-aug reproduces every finding
+
+The identical recipe on N-ain crossed its warm-start clean mAP at epoch 29
+(~70% of the schedule again), landed its best on the final epoch, and
+strictly dominates N-ain — clean up, every shift condition up, exact-zero
+`contrast-40%` preserved:
+
+| Metric | N (BN) | N-ain | N-ain-aug |
+| --- | ---: | ---: | ---: |
+| clean mAP | 90.6 | 87.9 | **88.3** |
+| mean mAP drop over the 8 shifts | -10.9 | -5.8 | **-3.8** |
+| warm (worst) absolute mAP | 65.3 | 71.9 | **77.8** |
+
+Ladder note: N-ain-aug (88.3 clean, 3.3M/1.49G) now beats plain T-ain
+(88.0 clean, 4.6M/2.12G) — a 40-epoch aug fine-tune is worth more than the
+x1.25 -> x1.5 width step, reinforcing that the CNN -ain ladder saturates at
+x1.25 and further gains come from training, not capacity.
+
 ## Export and deployment notes
 
 - InstanceNormalization is a standard ONNX op (ORT/TensorRT supported) but,

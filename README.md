@@ -386,6 +386,7 @@ Best checkpoints per variant, evaluated on the unified test split.
 | S-ain | ViT-S/16 + token-IN | 22.0M | 2.94 | 384 | 91.4 | 96.3 | 97.9 | 98.4 |
 | T-ain | OSNet-AIN x1.5 | 4.6M | 2.12 | 512 | 88.0 | 94.8 | 97.4 | 98.1 |
 | N-ain | OSNet-AIN x1.25 | 3.3M | 1.49 | 512 | 87.9 | 94.9 | 97.3 | 98.0 |
+| N-ain-aug | OSNet-AIN x1.25 (photometric-aug fine-tune of N-ain) | 3.3M | 1.49 | 512 | 88.3 | 95.0 | 97.3 | 98.0 |
 | P-ain | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 87.0 | 94.1 | 97.2 | 97.9 |
 | P-ain-aug | OSNet-AIN x1.0 (photometric-aug fine-tune of P-ain) | 2.2M | 0.98 | 512 | 87.6 | 94.5 | 97.2 | 98.0 |
 
@@ -401,7 +402,7 @@ Every tier exists (or is planned) in two flavors that share the same training re
 | Normalization | BatchNorm (CNN) / LayerNorm (ViT) only | Adds instance normalization at style-sensitive early positions: token-axis IN after the ViT patch embedding; the searched OSNet-AIN placement (IN stem + four IN blocks) for CNN tiers |
 | What the IN does | — | Removes each image's own style statistics (illumination, color cast, camera tone) from the features at inference time |
 | In-distribution accuracy | Highest on the unified test set | Slightly lower by design |
-| Unseen-environment robustness | Sensitive to camera/style shift; BatchNorm also carries training-set statistics into deployment | Style-invariant features and per-sample normalization — measured with the style-shift probe (`tools/eval_style_shift.py`, shifted queries vs clean gallery): mean mAP drop over 8 photometric shifts falls from 5.2 to 3.4 (B pair), 5.3 to 3.9 (S pair), 10.9 to 5.8 (N pair) and 10.3 to 5.1 (P pair), with exact-zero degradation under uniform gain/contrast shifts; under the hardest shift the `-ain` models beat their BN siblings in absolute mAP despite the lower clean score; a photometric-augmentation fine-tune (`P-ain-aug`, `INPUT.CJ_PROB`/`INPUT.BLUR_PROB`) further cuts the P-tier mean drop to 3.6 while also raising clean mAP to 87.6 |
+| Unseen-environment robustness | Sensitive to camera/style shift; BatchNorm also carries training-set statistics into deployment | Style-invariant features and per-sample normalization — measured with the style-shift probe (`tools/eval_style_shift.py`, shifted queries vs clean gallery): mean mAP drop over 8 photometric shifts falls from 5.2 to 3.4 (B pair), 5.3 to 3.9 (S pair), 10.9 to 5.8 (N pair) and 10.3 to 5.1 (P pair), with exact-zero degradation under uniform gain/contrast shifts; under the hardest shift the `-ain` models beat their BN siblings in absolute mAP despite the lower clean score; photometric-augmentation fine-tunes (`*-ain-aug`, `INPUT.CJ_PROB`/`INPUT.BLUR_PROB`) further cut the mean drop (P: 3.6, N: 3.8) while also raising clean mAP (P: 87.6, N: 88.3) |
 | Teacher for distilled tiers | B | B-ain |
 | ONNX | BatchNorm folds away entirely | InstanceNormalization nodes remain (runtime normalization; ViT: 1 node, OSNet: 5) with a small latency overhead |
 
