@@ -238,6 +238,22 @@ Ladder note: N-ain-aug (88.3 clean, 3.3M/1.49G) now beats plain T-ain
 x1.25 -> x1.5 width step, reinforcing that the CNN -ain ladder saturates at
 x1.25 and further gains come from training, not capacity.
 
+### T-ain-aug completes the CNN rollout
+
+Third tier, same trajectory (crossed the warm-start clean mAP at epoch 29,
+best on the final epoch), third strict domination:
+
+| Metric | T-ain | T-ain-aug |
+| --- | ---: | ---: |
+| clean mAP | 88.0 | **88.5** |
+| mean mAP drop over the 8 shifts | -5.6 | **-4.0** |
+| warm (worst) absolute mAP | 74.0 | **78.3** |
+
+Final CNN -ain-aug ladder: clean 87.6 / 88.3 / 88.5 (P/N/T) with mean
+shift drops 3.6 / 3.8 / 4.0 — the aug fine-tune lifts every tier by
+roughly the same amount, so the tier ordering (and the x1.25 sweet spot,
+with T-ain-aug only +0.2 over N-ain-aug for +42% FLOPs) is unchanged.
+
 ## Export and deployment notes
 
 - InstanceNormalization is a standard ONNX op (ORT/TensorRT supported) but,
