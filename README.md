@@ -394,16 +394,6 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 - The retired ViT student candidates and their measured results are recorded in [`docs/lightweight_students.md`](docs/lightweight_students.md).
 - B-ain is the teacher of the domain-generalization (`-ain`) ladder   ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance normalization after the patch embedding, trained with the B recipe over 75 epochs (the token-IN insertion costs a few adaptation epochs and, at convergence, 1.2 mAP of in-distribution accuracy versus B — the accepted price of style invariance).
 
-#### osnet_ain_ms_d_c - 2.2M
-
-| dataset | queries | gallery | mAP | R1 | R5 | R10 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| market | 3,368 | 15,913 | 0.4580 | 0.7304 | 0.8655 | 0.9047 |
-| msmt17 | 11,659 | 82,161 | 0.4869 | 0.7613 | 0.8662 | 0.8965 |
-| duke_occ | 2,210 | 17,661 | 0.4757 | 0.6167 | 0.7670 | 0.8163 |
-| cuhk03np | 1,400 | 5,332 | 0.5776 | 0.6079 | 0.7779 | 0.8543 |
-| occ_reid | 1,000 | 1,000 | 0.7407 | 0.8040 | 0.8970 | 0.9320 |
-
 #### B-ain-aug -  ViT-B/16 + token-IN - 86.5M
 
 | dataset | queries | gallery | mAP | R1 | R5 | R10 |
@@ -453,6 +443,16 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 | duke_occ | 2,210 | 17,661 | 0.8837 | 0.9226 | 0.9683 | 0.9787 |
 | cuhk03np | 1,400 | 5,332 | 0.9752 | 0.9807 | 0.9936 | 0.9979 |
 | occ_reid | 1,000 | 1,000 | 0.9831 | 0.9850 | 0.9940 | 0.9970 |
+
+#### osnet_ain_ms_d_c - 2.2M
+
+| dataset | queries | gallery | mAP | R1 | R5 | R10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| market | 3,368 | 15,913 | 0.4580 | 0.7304 | 0.8655 | 0.9047 |
+| msmt17 | 11,659 | 82,161 | 0.4869 | 0.7613 | 0.8662 | 0.8965 |
+| duke_occ | 2,210 | 17,661 | 0.4757 | 0.6167 | 0.7670 | 0.8163 |
+| cuhk03np | 1,400 | 5,332 | 0.5776 | 0.6079 | 0.7779 | 0.8543 |
+| occ_reid | 1,000 | 1,000 | 0.7407 | 0.8040 | 0.8970 | 0.9320 |
 
 #### `-ain` variants vs the standard ladder
 
