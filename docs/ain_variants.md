@@ -295,6 +295,17 @@ faster (crossing at ~1/3 of the schedule vs ~70% for the CNNs) and end
 up markedly more robust, consistent with token-IN's exact affine
 invariance leaving less for augmentation to fix.
 
+### Round-2 fine-tune (X-ain-aug2): small, predicted gain
+
+P-ain-aug2 (same recipe again, warm-started from P-ain-aug, distilled from
+the upgraded B-ain-aug teacher) landed exactly in the predicted +0.1..0.3
+band: clean 87.62 -> **87.81** (+0.18, crossed at epoch 29, best e38), with
+robustness essentially unchanged (mean drop 3.6 -> 3.5; per-condition
+absolutes within +-0.5 of round 1, exact-zero `contrast-40%` preserved).
+The gain cannot be attributed between the better teacher and the extra 40
+epochs, and a third round is expected to yield less — round 2 is a cheap
+"+0.2 clean for 2.5 GPU-hours" option per CNN tier, not a new lever.
+
 ## Export and deployment notes
 
 - InstanceNormalization is a standard ONNX op (ORT/TensorRT supported) but,
