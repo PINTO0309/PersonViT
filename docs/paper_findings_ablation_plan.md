@@ -215,6 +215,25 @@ rejected. Phase 2 = the P-tier `cam` arm (does `L_cam` still add under the
 relational-KD anchor?) plus its ctrl; Phase 3 = promote
 `B-ain-aug2-cam` (93.36) to teacher and re-distill/fine-tune the ladder.
 
+**Phase 3 rollout configs** (teacher promotion confirmed): each student
+warm-starts from its previous-round best and re-distills from
+`B-ain-aug2-cam` with **student-side CAMPROXY also enabled** (decision:
+combine both levers — the upgraded teacher geometry via distillation and
+the direct cross-camera pull — rather than attribute them separately; the
+standalone Phase-2 attribution arms remain available but are superseded):
+
+| Run | Config | Warm start |
+| --- | --- | --- |
+| S-ain-aug2 | `vit_small_8gb_distill_ain_aug2.yml` | S-ain-aug 91.63 |
+| P-ain-aug3 | `osnet_p_8gb_distill_ain_aug3.yml` | P-ain-aug2 87.81 |
+| N-ain-aug3 | `osnet_n_8gb_distill_ain_aug3.yml` | N-ain-aug2 88.44 |
+| T-ain-aug3 | `osnet_t_8gb_distill_ain_aug3.yml` | T-ain-aug2 88.61 |
+
+Note: the initial distillation loss is ~19 (vs ~0.4 when the teacher
+matched the students' lineage) — the L_cam teacher's logit/similarity
+geometry moved substantially, which is exactly the new signal being
+transferred; expect stronger early reshaping than in previous rounds.
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
