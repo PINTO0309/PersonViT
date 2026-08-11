@@ -234,6 +234,24 @@ matched the students' lineage) — the L_cam teacher's logit/similarity
 geometry moved substantially, which is exactly the new signal being
 transferred; expect stronger early reshaping than in previous rounds.
 
+**Phase 3 results:**
+
+| Run | clean mAP | vs prev round | probe mean drop | officials |
+| --- | ---: | ---: | ---: | --- |
+| S-ain-aug2 | **92.68** | **+1.05** | 2.2 -> **1.4** | all five improved (msmt17 +3.0, duke_occ +2.9, market +0.7, cuhk03np +0.9, occ_reid +0.1) |
+| P-ain-aug3 | | | | pending |
+| N-ain-aug3 | | | | pending |
+| T-ain-aug3 | | | | pending |
+
+S-ain-aug2 findings: the teacher's L_cam gain (+1.05) transferred to the
+S student without attenuation, and — unlike the NPO episode — the unified
+gain agrees with every official split, with the biggest official jumps on
+the many-camera msmt17 (+3.0) and duke_occ (+2.9). Robustness improved in
+the same run (warm absolute 82.0 -> 88.2, exact-zero conditions
+preserved). Trajectory as predicted: epoch-1 dip to 91.2 (initial distill
+loss ~18, reshaping toward the new teacher geometry), then a monotone
+climb through epoch 39.
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
