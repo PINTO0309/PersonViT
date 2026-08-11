@@ -152,7 +152,7 @@ C4 (`--rerank`) is not yet implemented (phase 0, independent of training).
 | A0 ctrl | 92.31 | — | -1.9 | 83.7 | baseline (plain round 2 = +0.05 over B-ain-aug, confirming the ~0 prediction) |
 | A1 `L_cam` | **93.36** | **+1.05** | **-1.3** | **89.1** | **ADOPTED** — clears the +0.2 gate five-fold and *improves* robustness |
 | A2 NPO | 92.57 | +0.26 | -1.7 | 85.7 | **REJECTED** — fails its occlusion gate (see below) |
-| A3 cosine-CE | | | | | pending |
+| A3 cosine-CE | 92.44 | +0.13 | -1.8 | 85.0 | **REJECTED** — positive but under the +0.2 gate |
 
 A1 findings: the gain is monotone from epoch 2 (the component acts
 immediately, unlike the LR-tail-driven plain rounds); clean 93.36 now
@@ -202,6 +202,18 @@ L_cam already lifts the occluded domains more (+1.2) than NPO ever
 targeted. The NPO line is closed; the domain-conditional mechanism stays
 available (default off) for any future occlusion-augmentation attempt
 with properly curated patches.
+
+A3 findings: direction positive everywhere (clean +0.13, probe mean
+1.9 -> 1.8, warm absolute +1.3) but below the adoption gate and below the
+paper's with-triplet band (+0.3..0.9) — BNNeck + soft triplet evidently
+already shape the angular structure cosine-CE targets. No harm, no
+adoption; not carried to Phase 2.
+
+**Phase 1 conclusion**: one clear winner. `L_cam` is adopted (+1.05 clean,
+official and unified agree, robustness improved); NPO and cosine-CE are
+rejected. Phase 2 = the P-tier `cam` arm (does `L_cam` still add under the
+relational-KD anchor?) plus its ctrl; Phase 3 = promote
+`B-ain-aug2-cam` (93.36) to teacher and re-distill/fine-tune the ladder.
 
 ## Measurement checklist per arm
 
