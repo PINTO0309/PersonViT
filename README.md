@@ -385,7 +385,7 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 | T-ain | OSNet-AIN x1.5 | 4.6M | 2.12 | 512 | 88.0 | 94.8 | 97.4 | 98.1 |
 | N-ain | OSNet-AIN x1.25 | 3.3M | 1.49 | 512 | 87.9 | 94.9 | 97.3 | 98.0 |
 | P-ain | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 87.0 | 94.1 | 97.2 | 97.9 |
-| B-ain-aug | ViT-B/16<br>+<br>token-IN | 86.5M | 11.35 | 768 | 92.3 | 96.6 | 97.9 | 98.3 |
+| B-ain-aug | ViT-B/16<br>+<br>token-IN | 86.5M | 11.35 | 768 | 93.4 | 96.9 | 98.1 | 98.6 |
 | S-ain-aug | ViT-S/16<br>+<br>token-IN | 22.0M | 2.94 | 384 | 91.6 | 96.6 | 98.1 | 98.5 |
 | T-ain-aug | OSNet-AIN x1.5 | 4.6M | 2.12 | 512 | 88.6 | 94.8 | 97.2 | 97.9 |
 | N-ain-aug | OSNet-AIN x1.25 | 3.3M | 1.49 | 512 | 88.4 | 95.0 | 97.3 | 98.0 |
@@ -398,11 +398,11 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 
 | dataset | queries | gallery | mAP | R1 | R5 | R10 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| market | 3,368 | 15,913 | 0.9793 | 0.9875 | 0.9961 | 0.9982 |
-| msmt17 | 11,659 | 82,161 | 0.8999 | 0.9557 | 0.9804 | 0.9835 |
-| duke_occ | 2,210 | 17,661 | 0.9206 | 0.9471 | 0.9801 | 0.9851 |
-| cuhk03np | 1,400 | 5,332 | 0.9795 | 0.9793 | 0.9907 | 0.9964 |
-| occ_reid | 1,000 | 1,000 | 0.9970 | 1.0000 | 1.0000 | 1.0000 |
+| market | 3,368 | 15,913 | 0.9857 | 0.9911 | 0.9979 | 0.9985 |
+| msmt17 | 11,659 | 82,161 | 0.9317 | 0.9662 | 0.9846 | 0.9870 |
+| duke_occ | 2,210 | 17,661 | 0.9461 | 0.9575 | 0.9824 | 0.9873 |
+| cuhk03np | 1,400 | 5,332 | 0.9873 | 0.9886 | 0.9929 | 0.9971 |
+| occ_reid | 1,000 | 1,000 | 0.9986 | 1.0000 | 1.0000 | 1.0000 |
 
 #### S-ain-aug -  ViT-S/16 + token-IN - 22.0M
 
@@ -463,7 +463,7 @@ Every tier exists (or is planned) in two flavors that share the same training re
 | Normalization | BatchNorm (CNN) / LayerNorm (ViT) only | Adds instance normalization at style-sensitive early positions: token-axis IN after the ViT patch embedding; the searched OSNet-AIN placement (IN stem + four IN blocks) for CNN tiers |
 | What the IN does | — | Removes each image's own style statistics (illumination, color cast, camera tone) from the features at inference time |
 | In-distribution accuracy | Highest on the unified test set | Slightly lower by design |
-| Unseen-environment robustness | Sensitive to camera/style shift; BatchNorm also carries training-set statistics into deployment | Style-invariant features and per-sample normalization — measured with the style-shift probe (`tools/eval_style_shift.py`, shifted queries vs clean gallery): mean mAP drop over 8 photometric shifts falls from 5.2 to 3.4 (B pair), 5.3 to 3.9 (S pair), 10.9 to 5.8 (N pair) and 10.3 to 5.1 (P pair), with exact-zero degradation under uniform gain/contrast shifts; under the hardest shift the `-ain` models beat their BN siblings in absolute mAP despite the lower clean score; photometric-augmentation fine-tunes (`*-ain-aug`, `INPUT.CJ_PROB`/`INPUT.BLUR_PROB`) further cut the mean drop (B: 1.8, S: 2.2, P: 3.5, N: 3.8, T: 3.9) while also raising clean mAP (B: 92.3, S: 91.6, P: 87.8, N: 88.4, T: 88.6) |
+| Unseen-environment robustness | Sensitive to camera/style shift; BatchNorm also carries training-set statistics into deployment | Style-invariant features and per-sample normalization — measured with the style-shift probe (`tools/eval_style_shift.py`, shifted queries vs clean gallery): mean mAP drop over 8 photometric shifts falls from 5.2 to 3.4 (B pair), 5.3 to 3.9 (S pair), 10.9 to 5.8 (N pair) and 10.3 to 5.1 (P pair), with exact-zero degradation under uniform gain/contrast shifts; under the hardest shift the `-ain` models beat their BN siblings in absolute mAP despite the lower clean score; photometric-augmentation fine-tunes (`*-ain-aug`, `INPUT.CJ_PROB`/`INPUT.BLUR_PROB`) further cut the mean drop (B: 1.3, S: 2.2, P: 3.5, N: 3.8, T: 3.9) while also raising clean mAP (B: 93.4, S: 91.6, P: 87.8, N: 88.4, T: 88.6); the B number includes the camera-aware proxy contrastive loss (`CAMPROXY`, see [`docs/paper_findings_ablation_plan.md`](docs/paper_findings_ablation_plan.md)) adopted from the paper-component ablation |
 | Teacher for distilled tiers | B | B-ain |
 | ONNX | BatchNorm folds away entirely | InstanceNormalization nodes remain (runtime normalization; ViT: 1 node, OSNet: 5) with a small latency overhead |
 
