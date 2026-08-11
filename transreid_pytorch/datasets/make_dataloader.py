@@ -45,6 +45,9 @@ def val_collate_fn(batch):
 
 def make_dataloader(cfg):
     photometric = []
+    if cfg.INPUT.NPO_PROB > 0:
+        from datasets.npo import RandomNPOPaste
+        photometric.append(RandomNPOPaste(cfg.INPUT.NPO_PROB, cfg.INPUT.NPO_PATCH_DIR))
     if cfg.INPUT.CJ_PROB > 0:
         photometric.append(T.RandomApply([T.ColorJitter(
             brightness=cfg.INPUT.CJ_BRIGHTNESS, contrast=cfg.INPUT.CJ_CONTRAST,

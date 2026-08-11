@@ -6,6 +6,8 @@ transreid_pytorch/data/*
 !transreid_pytorch/data/.gitkeep
 transreid_pytorch/logs/*
 !transreid_pytorch/logs/.gitkeep
+# dataset-derived, regenerated deterministically by tools/build_npo_patches.py
+transreid_pytorch/npo_patches/
 _pyproject.toml
 .venv/
 *.pdf

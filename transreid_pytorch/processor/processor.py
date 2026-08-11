@@ -129,9 +129,19 @@ def do_train(cfg,
         teacher.to(local_rank)
         teacher.eval()
 
+    cam_proxy_criterion = None
+    if cfg.CAMPROXY.ENABLED:
+        from loss.cam_proxy import CameraProxyLoss
+        cam_proxy_criterion = CameraProxyLoss(
+            tau=cfg.CAMPROXY.TAU, momentum=cfg.CAMPROXY.MOMENTUM,
+            hard_negatives=cfg.CAMPROXY.HARD_NEGATIVES)
+        logger.info('camera-proxy contrastive loss enabled '
+                    '(weight {}, tau {})'.format(cfg.CAMPROXY.WEIGHT, cfg.CAMPROXY.TAU))
+
     loss_meter = AverageMeter()
     acc_meter = AverageMeter()
     distill_meter = AverageMeter()
+    cam_meter = AverageMeter()
 
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     scaler = amp.GradScaler('cuda')
@@ -168,6 +178,7 @@ def do_train(cfg,
         loss_meter.reset()
         acc_meter.reset()
         distill_meter.reset()
+        cam_meter.reset()
         evaluator.reset()
         model.train()
         for n_iter, (img, vid, target_cam, target_view) in enumerate(train_loader):
@@ -186,6 +197,10 @@ def do_train(cfg,
                     distill_loss = distill_criterion(score, feat, teacher_score, teacher_feat)
                     distill_meter.update(distill_loss.item(), img.shape[0])
                     loss = loss + distill_loss
+                if cam_proxy_criterion is not None:
+                    cam_loss = cam_proxy_criterion(feat, target, target_cam)
+                    cam_meter.update(cam_loss.item(), img.shape[0])
+                    loss = loss + cfg.CAMPROXY.WEIGHT * cam_loss
 
             scaler.scale(loss).backward()
 
@@ -212,6 +227,8 @@ def do_train(cfg,
                     epoch, (n_iter + 1), len(train_loader), loss_meter.avg, acc_meter.avg, base_lr)
                 if distill_criterion is not None:
                     msg += ", Distill: {:.3f}".format(distill_meter.avg)
+                if cam_proxy_criterion is not None:
+                    msg += ", Cam: {:.3f}".format(cam_meter.avg)
                 logger.info(msg)
 
         end_time = time.time()

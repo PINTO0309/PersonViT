@@ -1,0 +1,80 @@
+# Unified reid dataset / paper-component ablation, round-3 fine-tune of
+# P-ain-aug2 (87.81) / 8 GB GPU — see docs/paper_findings_ablation_plan.md
+# A2: + NPO occlusion-paste augmentation (FED, arXiv:2112.08740)
+# Pastes realistic occluder patches (datasets/npo.py; generate the set
+# once with tools/build_npo_patches.py). RandomErasing is reduced to
+# 0.25 in exchange. Judged on d03/d04 per-domain and the occluded
+# official splits (>+0.5) with clean within -0.1 of the ctrl arm.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_osnet_p_8gb_distill_ain_aug2/transformer_best_e000038_map0.87806.pth'
+  PRETRAIN_HW_RATIO: 1
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'osnet_ain_x1_0'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.25 # random erasing (reduced: NPO takes over occlusion duty)
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  NPO_PROB: 0.5
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+DISTILL:
+  ENABLED: True
+  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_aug.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_aug/transformer_best_*.pth'
+  LOGIT_WEIGHT: 1.0
+  REL_WEIGHT: 30.0
+  EMBED_WEIGHT: 0.0
+  TEMPERATURE: 4.0
+
+SOLVER:
+  OPTIMIZER_NAME: 'Adam'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.0001
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 64
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  5e-4
+  WEIGHT_DECAY_BIAS: 5e-4
+  BIAS_LR_FACTOR: 1
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_aug3_npo'

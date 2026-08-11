@@ -180,6 +180,12 @@ class build_transformer(nn.Module):
         self.reduce_feat_dim = cfg.MODEL.REDUCE_FEAT_DIM
         self.feat_dim = cfg.MODEL.FEAT_DIM
         self.dropout_rate = cfg.MODEL.DROPOUT_RATE
+        # cosine-classifier CE (CAL's degenerate form): weights stay in the
+        # plain nn.Linear so checkpoints remain key-compatible either way
+        self.cos_classifier = cfg.MODEL.COS_CLASSIFIER
+        self.cos_temperature = cfg.MODEL.COS_TEMPERATURE
+        if self.cos_classifier:
+            print('using cosine classifier (scale {})'.format(self.cos_temperature))
 
         print('using backbone: {}'.format(cfg.MODEL.TRANSFORMER_TYPE))
 
@@ -243,6 +249,10 @@ class build_transformer(nn.Module):
         if self.training:
             if self.ID_LOSS_TYPE in ('arcface', 'cosface', 'amsoftmax', 'circle'):
                 cls_score = self.classifier(feat_cls, label)
+            elif self.cos_classifier:
+                cls_score = self.cos_temperature * nn.functional.linear(
+                    nn.functional.normalize(feat_cls, dim=1),
+                    nn.functional.normalize(self.classifier.weight, dim=1))
             else:
                 cls_score = self.classifier(feat_cls)
 
