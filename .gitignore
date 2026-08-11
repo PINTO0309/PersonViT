@@ -8,3 +8,4 @@ transreid_pytorch/logs/*
 !transreid_pytorch/logs/.gitkeep
 _pyproject.toml
 .venv/
+*.pdf
