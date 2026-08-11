@@ -31,6 +31,7 @@ from config import cfg
 from datasets import make_dataloader
 from datasets.reid import REID
 from model import make_model
+from tools.eval_cache import EvalCache, checkpoint_signature
 from utils.metrics import euclidean_distance, eval_func
 
 
@@ -60,6 +61,8 @@ def main():
     ap.add_argument('--weight', required=True, help='trained checkpoint (glob allowed)')
     ap.add_argument('--markdown', action='store_true',
                     help='print the results table in Markdown (paste-ready for README/docs)')
+    ap.add_argument('--recompute', action='store_true',
+                    help='ignore eval_cache.json and re-evaluate')
     ap.add_argument('opts', nargs=argparse.REMAINDER,
                     help='extra config overrides in KEY VALUE form')
     args = ap.parse_args()
@@ -81,53 +84,79 @@ def main():
         cfg.merge_from_list(args.opts)
     cfg.freeze()
 
-    _, _, val_loader, num_query, num_classes, cam_num, view_num = make_dataloader(cfg)
-    model = make_model(cfg, num_class=num_classes, camera_num=cam_num, view_num=view_num)
-    model.load_param(weight)
-    model.to('cuda')
+    cache = EvalCache(weight, enabled=not args.recompute)
+    key = {'tool': 'eval_per_domain', 'checkpoint': checkpoint_signature(weight),
+           'config': os.path.basename(args.config), 'opts': args.opts}
+    results = cache.get(key)
+    from_cache = results is not None
 
-    # sample metadata in val_loader order (dataset.query + dataset.gallery)
-    dataset = REID(root=cfg.DATASETS.ROOT_DIR, verbose=False)
-    samples = dataset.query + dataset.gallery
-    pids = np.array([s[1] for s in samples])
-    camids = np.array([s[2] for s in samples])
-    doms = np.array([s[3] for s in samples])
+    if results is None:
+        _, _, val_loader, num_query, num_classes, cam_num, view_num = make_dataloader(cfg)
+        model = make_model(cfg, num_class=num_classes, camera_num=cam_num, view_num=view_num)
+        model.load_param(weight)
+        model.to('cuda')
 
-    feats = extract_features(model, val_loader).cpu()
-    del model
-    torch.cuda.empty_cache()  # distances run on CPU; free the GPU immediately
-    if cfg.TEST.FEAT_NORM == 'yes':
-        feats = torch.nn.functional.normalize(feats, dim=1, p=2)
-    qf, gf = feats[:num_query], feats[num_query:]
-    q_pids, g_pids = pids[:num_query], pids[num_query:]
-    q_camids, g_camids = camids[:num_query], camids[num_query:]
-    q_doms, g_doms = doms[:num_query], doms[num_query:]
+        # sample metadata in val_loader order (dataset.query + dataset.gallery)
+        dataset = REID(root=cfg.DATASETS.ROOT_DIR, verbose=False)
+        samples = dataset.query + dataset.gallery
+        pids = np.array([s[1] for s in samples])
+        camids = np.array([s[2] for s in samples])
+        doms = np.array([s[3] for s in samples])
 
-    distmat = euclidean_distance(qf, gf)
+        feats = extract_features(model, val_loader).cpu()
+        del model
+        torch.cuda.empty_cache()  # distances run on CPU; free the GPU immediately
+        if cfg.TEST.FEAT_NORM == 'yes':
+            feats = torch.nn.functional.normalize(feats, dim=1, p=2)
+        qf, gf = feats[:num_query], feats[num_query:]
+        q_pids, g_pids = pids[:num_query], pids[num_query:]
+        q_camids, g_camids = camids[:num_query], camids[num_query:]
+        q_doms, g_doms = doms[:num_query], doms[num_query:]
+
+        distmat = euclidean_distance(qf, gf)
+
+        results = {
+            'overall': [float(v) for v in
+                        evaluate(distmat, q_pids, g_pids, q_camids, g_camids)],
+            'queries': int(num_query), 'gallery': int(len(g_pids)), 'domains': [],
+        }
+        for d in sorted(set(q_doms.tolist())):
+            iq = q_doms == d
+            ig = g_doms == d
+            within = evaluate(
+                euclidean_distance(qf[torch.as_tensor(iq)], gf[torch.as_tensor(ig)]),
+                q_pids[iq], g_pids[ig], q_camids[iq], g_camids[ig])
+            merged = evaluate(distmat[iq], q_pids[iq], g_pids, q_camids[iq], g_camids)
+            results['domains'].append({
+                'domain': int(d), 'queries': int(iq.sum()), 'gallery': int(ig.sum()),
+                'within': [float(v) for v in within],
+                'merged': [float(v) for v in merged]})
+        cache.put(key, results, log_lines=_render(results, markdown=False))
 
     print('\nmodel  : {}'.format(weight))
-    print('overall: mAP {:.4f}  Rank-1 {:.4f}  Rank-5 {:.4f}  '
-          '({:,} query / {:,} gallery)'.format(
-              *evaluate(distmat, q_pids, g_pids, q_camids, g_camids),
-              num_query, len(g_pids)))
-    if args.markdown:
-        print('| domain | queries | gallery | within mAP | within R1 | within R5 | merged mAP | merged R1 | merged R5 |')
-        print('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
+    if from_cache:
+        print('cache  : reused from {}'.format(cache.path))
+    for line in _render(results, markdown=args.markdown):
+        print(line)
+
+
+def _render(results, markdown):
+    lines = ['overall: mAP {:.4f}  Rank-1 {:.4f}  Rank-5 {:.4f}  '
+             '({:,} query / {:,} gallery)'.format(
+                 *results['overall'], results['queries'], results['gallery'])]
+    if markdown:
+        lines.append('| domain | queries | gallery | within mAP | within R1 | within R5 | merged mAP | merged R1 | merged R5 |')
+        lines.append('| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
     else:
-        print('domain | queries | gallery | within: mAP    R1     R5   | merged: mAP    R1     R5')
-    for d in sorted(set(q_doms.tolist())):
-        iq = q_doms == d
-        ig = g_doms == d
-        within = evaluate(
-            euclidean_distance(qf[torch.as_tensor(iq)], gf[torch.as_tensor(ig)]),
-            q_pids[iq], g_pids[ig], q_camids[iq], g_camids[ig])
-        merged = evaluate(distmat[iq], q_pids[iq], g_pids, q_camids[iq], g_camids)
-        if args.markdown:
-            print('| d{:02d} | {:,} | {:,} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.4f} |'.format(
-                d, int(iq.sum()), int(ig.sum()), *within, *merged))
+        lines.append('domain | queries | gallery | within: mAP    R1     R5   | merged: mAP    R1     R5')
+    for row in results['domains']:
+        if markdown:
+            lines.append('| d{:02d} | {:,} | {:,} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.4f} | {:.4f} |'.format(
+                row['domain'], row['queries'], row['gallery'], *row['within'], *row['merged']))
         else:
-            print('d{:02d}    | {:7,d} | {:7,d} | {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f}'.format(
-                d, int(iq.sum()), int(ig.sum()), *within, *merged))
+            lines.append('d{:02d}    | {:7,d} | {:7,d} | {:.4f} {:.4f} {:.4f} | {:.4f} {:.4f} {:.4f}'.format(
+                row['domain'], row['queries'], row['gallery'], *row['within'], *row['merged']))
+    return lines
 
 
 if __name__ == '__main__':

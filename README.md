@@ -538,6 +538,10 @@ python tools/eval_style_shift.py \
 
 The `dmAP`/`dR1` columns are the drops versus the clean condition; compare models by the mean drop over the eight shifts and the absolute mAP under the worst shift (typically `warm`). `-ain` models are expected to show exactly 0.0000 drop under `dark-30%` and `contrast-40%` — token-IN removes uniform affine pixel changes mathematically. Gallery features are extracted once and reused, so a probe takes roughly 10 minutes for the OSNet tiers and ~30 minutes for ViT-B on an RTX 3070.
 
+### Evaluation result caching
+
+All four evaluation tools (`eval_official.py`, `eval_official_onnx.py`, `eval_per_domain.py`, `eval_style_shift.py`) persist their numeric results to `eval_cache.json` next to the evaluated checkpoint (or ONNX file), keyed by tool, checkpoint identity (name/size/mtime), config, and evaluation parameters. Re-running the same command — for example only to switch between the plain and `--markdown` table formats — reuses the stored numbers and skips feature extraction entirely (a `cache : reused ...` line marks it; `eval_official*` reuses per dataset, so adding datasets recomputes only the missing ones). Pass `--recompute` to force a fresh evaluation. Fresh results are additionally appended with timestamps to `eval_log.txt` in the same directory, building a per-run evaluation history.
+
 ## ONNX export
 
 [`export_onnx.py`](export_onnx.py) exports all eight supervised PersonViTReID models (four datasets, each with ViT-S/16 and ViT-B/16) to the [`onnx`](onnx) directory. Missing PyTorch checkpoints are downloaded from the pinned `lakeAGI/PersonViTReID` revision automatically.

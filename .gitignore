@@ -1,6 +1,8 @@
 __pycache__/
 *.py[cod]
 onnx/*.onnx
+onnx/eval_cache.json
+onnx/eval_log.txt
 *.pth
 transreid_pytorch/data/*
 !transreid_pytorch/data/.gitkeep

@@ -37,6 +37,7 @@ from datasets.make_dataloader import val_collate_fn
 from datasets.reid import REID
 from datasets.style_shift import CONDITIONS, StyleShift
 from model import make_model
+from tools.eval_cache import EvalCache, checkpoint_signature
 from utils.metrics import euclidean_distance, eval_func
 
 
@@ -76,6 +77,8 @@ def main():
                     help="'query': shift queries only (default); 'all': shift both sides")
     ap.add_argument('--markdown', action='store_true',
                     help='print the results table in Markdown (paste-ready for README/docs)')
+    ap.add_argument('--recompute', action='store_true',
+                    help='ignore eval_cache.json and re-evaluate')
     ap.add_argument('opts', nargs=argparse.REMAINDER,
                     help='extra config overrides in KEY VALUE form')
     args = ap.parse_args()
@@ -96,45 +99,68 @@ def main():
         cfg.merge_from_list(args.opts)
     cfg.freeze()
 
-    model = make_model(cfg, num_class=751, camera_num=0, view_num=0)
-    model.load_param(weight)
-    model.to('cuda')
+    cache = EvalCache(weight, enabled=not args.recompute)
+    key = {'tool': 'eval_style_shift', 'checkpoint': checkpoint_signature(weight),
+           'config': os.path.basename(args.config), 'mode': args.mode,
+           'opts': args.opts}
+    rows = cache.get(key)
+    from_cache = rows is not None
 
-    dataset = REID(root=cfg.DATASETS.ROOT_DIR, verbose=False)
-    q_pids = np.array([s[1] for s in dataset.query])
-    q_camids = np.array([s[2] for s in dataset.query])
-    g_pids = np.array([s[1] for s in dataset.gallery])
-    g_camids = np.array([s[2] for s in dataset.gallery])
+    if rows is None:
+        model = make_model(cfg, num_class=751, camera_num=0, view_num=0)
+        model.load_param(weight)
+        model.to('cuda')
 
-    clean_gallery = extract(model, dataset.gallery, build_transforms(None))
+        dataset = REID(root=cfg.DATASETS.ROOT_DIR, verbose=False)
+        q_pids = np.array([s[1] for s in dataset.query])
+        q_camids = np.array([s[2] for s in dataset.query])
+        g_pids = np.array([s[1] for s in dataset.gallery])
+        g_camids = np.array([s[2] for s in dataset.gallery])
+
+        clean_gallery = extract(model, dataset.gallery, build_transforms(None))
+
+        rows = []
+        for name, fn in CONDITIONS.items():
+            transforms = build_transforms(fn)
+            qf = extract(model, dataset.query, transforms)
+            gf = (clean_gallery if args.mode == 'query' or fn is None
+                  else extract(model, dataset.gallery, transforms))
+            cmc, mAP = eval_func(euclidean_distance(qf, gf),
+                                 q_pids, g_pids, q_camids, g_camids)[:2]
+            rows.append({'condition': name, 'mAP': float(mAP), 'r1': float(cmc[0])})
+        cache.put(key, rows, log_lines=['mode   : {} shifted'.format(args.mode)]
+                  + _render(rows, markdown=False))
 
     print('\nmodel  : {}'.format(weight))
     print('mode   : {} shifted'.format('query only' if args.mode == 'query' else 'query+gallery'))
+    if from_cache:
+        print('cache  : reused from {}'.format(cache.path))
     if args.markdown:
         print('| condition | mAP | R1 | dmAP | dR1 |')
         print('| --- | ---: | ---: | ---: | ---: |')
     else:
         print('condition    |    mAP     R1   | dmAP    dR1')
-    clean_map = clean_r1 = None
-    for name, fn in CONDITIONS.items():
-        transforms = build_transforms(fn)
-        qf = extract(model, dataset.query, transforms)
-        gf = (clean_gallery if args.mode == 'query' or fn is None
-              else extract(model, dataset.gallery, transforms))
-        cmc, mAP = eval_func(euclidean_distance(qf, gf),
-                             q_pids, g_pids, q_camids, g_camids)[:2]
+    for line in _render(rows, markdown=args.markdown):
+        print(line)
+
+
+def _render(rows, markdown):
+    clean = next(row for row in rows if row['condition'] == 'clean')
+    lines = []
+    for row in rows:
+        name, mAP, r1 = row['condition'], row['mAP'], row['r1']
         if name == 'clean':
-            clean_map, clean_r1 = mAP, cmc[0]
-            if args.markdown:
-                print('| {} | {:.4f} | {:.4f} | — | — |'.format(name, mAP, cmc[0]))
-            else:
-                print('{:12s} | {:.4f} {:.4f} |    —      —'.format(name, mAP, cmc[0]))
-        elif args.markdown:
-            print('| {} | {:.4f} | {:.4f} | {:+.4f} | {:+.4f} |'.format(
-                name, mAP, cmc[0], mAP - clean_map, cmc[0] - clean_r1))
+            lines.append('| {} | {:.4f} | {:.4f} | — | — |'.format(name, mAP, r1)
+                         if markdown else
+                         '{:12s} | {:.4f} {:.4f} |    —      —'.format(name, mAP, r1))
         else:
-            print('{:12s} | {:.4f} {:.4f} | {:+.4f} {:+.4f}'.format(
-                name, mAP, cmc[0], mAP - clean_map, cmc[0] - clean_r1))
+            lines.append(
+                '| {} | {:.4f} | {:.4f} | {:+.4f} | {:+.4f} |'.format(
+                    name, mAP, r1, mAP - clean['mAP'], r1 - clean['r1'])
+                if markdown else
+                '{:12s} | {:.4f} {:.4f} | {:+.4f} {:+.4f}'.format(
+                    name, mAP, r1, mAP - clean['mAP'], r1 - clean['r1']))
+    return lines
 
 
 if __name__ == '__main__':
