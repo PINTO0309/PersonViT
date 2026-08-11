@@ -145,6 +145,27 @@ for the ctrl arm and the Phase-1 winners.
 
 C4 (`--rerank`) is not yet implemented (phase 0, independent of training).
 
+## Phase 1 results (teacher arms)
+
+| Arm | clean mAP | vs A0 | mean shift drop | warm absolute | Verdict |
+| --- | ---: | ---: | ---: | ---: | --- |
+| A0 ctrl | 92.31 | — | -1.9 | 83.7 | baseline (plain round 2 = +0.05 over B-ain-aug, confirming the ~0 prediction) |
+| A1 `L_cam` | **93.36** | **+1.05** | **-1.3** | **89.1** | **ADOPTED** — clears the +0.2 gate five-fold and *improves* robustness |
+| A2 NPO | | | | | pending |
+| A3 cosine-CE | | | | | pending |
+
+A1 findings: the gain is monotone from epoch 2 (the component acts
+immediately, unlike the LR-tail-driven plain rounds); clean 93.36 now
+**exceeds the BN teacher B (93.31)** — L_cam recovered the entire -ain
+in-distribution cost; and robustness improved alongside (mean drop
+1.9 -> 1.3, warm absolute +5.4, both exact-zero conditions preserved) —
+consistent with camera invariance and style invariance being the same
+axis viewed from two sides. Cross-camera intra-class variance was
+evidently the largest term ID+triplet left on the table. Per-domain
+(within mAP, A0 -> A1): the many-camera hardest domain d01 gains most
+(+1.32) as hypothesized, but the lift is broad — d03 +1.25, d04 +1.22,
+d00 +1.05 — with only the saturated d02 flat (+0.20).
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
