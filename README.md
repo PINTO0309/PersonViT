@@ -521,6 +521,23 @@ python tools/eval_official_onnx.py \
 INPUT.PIXEL_MEAN "[0.485,0.456,0.406]" INPUT.PIXEL_STD "[0.229,0.224,0.225]"
 ```
 
+### Style-shift robustness probe
+
+[`tools/eval_style_shift.py`](transreid_pytorch/tools/eval_style_shift.py) measures how much retrieval quality degrades when the capture style changes, without leaving the unified 5-domain protocol: the queries are re-rendered under eight deterministic photometric shifts (brightness ±30%, contrast ±40%, warm/cool color temperature, gamma 0.6/1.6; defined in [`datasets/style_shift.py`](transreid_pytorch/datasets/style_shift.py)) and matched against the clean gallery — simulating new cameras or lighting joining a deployment. This probe produced the BN-vs-`-ain` robustness numbers in the comparison table above.
+
+```shell
+cd transreid_pytorch
+python tools/eval_style_shift.py \
+--config configs/reid/osnet_p_8gb_distill_ain_aug2.yml \
+--weight "logs/reid_osnet_p_8gb_distill_ain_aug2/transformer_best_*.pth"
+```
+
+- `--weight` accepts a glob and also resume-format checkpoints (`checkpoint_last.pth`), so both the selected best and the final-epoch model can be probed.
+- `--mode all` shifts the gallery too (a fully re-deployed camera network); the default query-only mode is the more discriminative setting.
+- `--markdown` prints a paste-ready table; trailing `KEY VALUE` pairs override the config as usual.
+
+The `dmAP`/`dR1` columns are the drops versus the clean condition; compare models by the mean drop over the eight shifts and the absolute mAP under the worst shift (typically `warm`). `-ain` models are expected to show exactly 0.0000 drop under `dark-30%` and `contrast-40%` — token-IN removes uniform affine pixel changes mathematically. Gallery features are extracted once and reused, so a probe takes roughly 10 minutes for the OSNet tiers and ~30 minutes for ViT-B on an RTX 3070.
+
 ## ONNX export
 
 [`export_onnx.py`](export_onnx.py) exports all eight supervised PersonViTReID models (four datasets, each with ViT-S/16 and ViT-B/16) to the [`onnx`](onnx) directory. Missing PyTorch checkpoints are downloaded from the pinned `lakeAGI/PersonViTReID` revision automatically.
