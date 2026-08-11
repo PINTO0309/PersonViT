@@ -21,6 +21,8 @@ import random
 from PIL import Image
 import torchvision.transforms as T
 
+from datasets.bases import ImageDataset, read_image
+
 
 class RandomNPOPaste:
     def __init__(self, probability, patch_dir):
@@ -50,3 +52,29 @@ class RandomNPOPaste:
         img = img.copy()
         img.paste(patch.resize(new_size, Image.BILINEAR), position)
         return img
+
+
+class NPOImageDataset(ImageDataset):
+    """ImageDataset that pastes NPO occluders before the transform chain,
+    skipping samples whose domain (the view slot of the sample tuple) is
+    excluded — already-occluded source domains would otherwise get a second,
+    feature-destroying occlusion on top of the real one.
+
+    Pasting happens on the raw image (pre-Resize) instead of the post-crop
+    slot the plain Compose used; relative patch coverage is preserved by
+    Resize, with only the +-10px RandomCrop jitter as difference.
+    """
+
+    def __init__(self, dataset, transform, paste, exclude_domains=()):
+        super(NPOImageDataset, self).__init__(dataset, transform)
+        self.paste = paste
+        self.exclude_domains = set(exclude_domains)
+
+    def __getitem__(self, index):
+        img_path, pid, camid, trackid = self.dataset[index]
+        img = read_image(img_path)
+        if trackid not in self.exclude_domains:
+            img = self.paste(img)
+        if self.transform is not None:
+            img = self.transform(img)
+        return img, pid, camid, trackid, img_path

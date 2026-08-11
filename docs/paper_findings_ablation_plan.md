@@ -151,7 +151,7 @@ C4 (`--rerank`) is not yet implemented (phase 0, independent of training).
 | --- | ---: | ---: | ---: | ---: | --- |
 | A0 ctrl | 92.31 | — | -1.9 | 83.7 | baseline (plain round 2 = +0.05 over B-ain-aug, confirming the ~0 prediction) |
 | A1 `L_cam` | **93.36** | **+1.05** | **-1.3** | **89.1** | **ADOPTED** — clears the +0.2 gate five-fold and *improves* robustness |
-| A2 NPO | | | | | pending |
+| A2 NPO | 92.57 | +0.26 | -1.7 | 85.7 | **REJECTED** — fails its occlusion gate (see below) |
 | A3 cosine-CE | | | | | pending |
 
 A1 findings: the gain is monotone from epoch 2 (the component acts
@@ -165,6 +165,43 @@ evidently the largest term ID+triplet left on the table. Per-domain
 (within mAP, A0 -> A1): the many-camera hardest domain d01 gains most
 (+1.32) as hypothesized, but the lift is broad — d03 +1.25, d04 +1.22,
 d00 +1.05 — with only the saturated d02 flat (+0.20).
+
+A2 findings: clean nudged up (+0.26) and the probe stayed healthy (mean
+drop 1.9 -> 1.7), but the full official-split sweep (all five source
+datasets, ctrl vs npo) came back **negative across the board**:
+
+| domain | official split | A0 ctrl | A2 npo | delta | unified within delta |
+| --- | --- | ---: | ---: | ---: | ---: |
+| d00 | cuhk03np | 98.24 | 98.01 | -0.23 | -0.04 |
+| d01 | msmt17 | 91.08 | 90.35 | -0.73 | +0.30 |
+| d02 | market | 98.17 | 97.99 | -0.18 | +0.19 |
+| d03 | duke_occ | 93.03 | 92.11 | -0.92 | +0.39 |
+| d04 | occ_reid | 99.70 | 99.21 | -0.49 | -0.18* |
+
+(*unified d04 -0.03 within; official protocol shown.) Two readings, both
+partly supported: (a) **double occlusion** — pasting on the genuinely
+occluded d03/d04 train images damages heavily-occluded-view features;
+still the best explanation for duke_occ being the worst (-0.92, its
+official queries are all-occluded) where the mixed-query unified d03
+improved (+0.39). FED avoided this because Occluded-Duke's *train* split
+is mostly holistic; ours is not. (b) **distribution familiarity, not
+robustness** — the unified test gains flip sign on every official split
+(most tellingly holistic msmt17: within +0.30 vs official -0.73), so the
+auto-patches (border strips drawn from the training pool itself) taught
+the model the augmented unified distribution rather than transferable
+occlusion invariance. Lesson recorded: a unified-test gain alone cannot
+adopt a component; official splits must agree (L_cam passes both). (c,
+minor) halving RandomErasing traded away a proven augmentation. A
+domain-conditional variant that would separate (a) from (b) — paste on
+d01/d02 only, RandomErasing restored to 0.5 — was implemented
+(`INPUT.NPO_EXCLUDE_DOMAINS`, a domain-conditional dataset wrapper in
+`datasets/npo.py`, exclusion verified per domain) but **dropped from the
+validation queue by decision**: with distribution familiarity (b) as the
+dominant reading, even a positive result would not lead to adoption, and
+L_cam already lifts the occluded domains more (+1.2) than NPO ever
+targeted. The NPO line is closed; the domain-conditional mechanism stays
+available (default off) for any future occlusion-augmentation attempt
+with properly curated patches.
 
 ## Measurement checklist per arm
 

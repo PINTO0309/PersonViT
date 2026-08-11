@@ -118,6 +118,9 @@ _C.INPUT.BLUR_SIGMA = [0.1, 2.0]
 # tools/build_npo_patches.py into NPO_PATCH_DIR (relative to transreid_pytorch/)
 _C.INPUT.NPO_PROB = 0.0
 _C.INPUT.NPO_PATCH_DIR = 'npo_patches'
+# domains (the sample tuple's view/domain slot) that NPO must NOT paste on —
+# already-occluded source domains suffer double occlusion otherwise
+_C.INPUT.NPO_EXCLUDE_DOMAINS = []
 
 # -----------------------------------------------------------------------------
 # Dataset

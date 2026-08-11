@@ -45,9 +45,6 @@ def val_collate_fn(batch):
 
 def make_dataloader(cfg):
     photometric = []
-    if cfg.INPUT.NPO_PROB > 0:
-        from datasets.npo import RandomNPOPaste
-        photometric.append(RandomNPOPaste(cfg.INPUT.NPO_PROB, cfg.INPUT.NPO_PATCH_DIR))
     if cfg.INPUT.CJ_PROB > 0:
         photometric.append(T.RandomApply([T.ColorJitter(
             brightness=cfg.INPUT.CJ_BRIGHTNESS, contrast=cfg.INPUT.CJ_CONTRAST,
@@ -82,7 +79,16 @@ def make_dataloader(cfg):
     else:
         dataset = __factory[cfg.DATASETS.NAMES](root=cfg.DATASETS.ROOT_DIR)
 
-    train_set = ImageDataset(dataset.train, train_transforms)
+    if cfg.INPUT.NPO_PROB > 0:
+        # domain-conditional paste needs the sample's domain slot, so NPO
+        # lives at the dataset level rather than in the transform Compose
+        from datasets.npo import NPOImageDataset, RandomNPOPaste
+        train_set = NPOImageDataset(
+            dataset.train, train_transforms,
+            RandomNPOPaste(cfg.INPUT.NPO_PROB, cfg.INPUT.NPO_PATCH_DIR),
+            exclude_domains=cfg.INPUT.NPO_EXCLUDE_DOMAINS)
+    else:
+        train_set = ImageDataset(dataset.train, train_transforms)
     train_set_normal = ImageDataset(dataset.train, val_transforms)
     num_classes = dataset.num_train_pids
     cam_num = dataset.num_train_cams
