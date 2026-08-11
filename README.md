@@ -550,6 +550,7 @@ python tools/eval_style_shift.py \
 
 - `--weight` accepts a glob and also resume-format checkpoints (`checkpoint_last.pth`), so both the selected best and the final-epoch model can be probed.
 - `--mode all` shifts the gallery too (a fully re-deployed camera network); the default query-only mode is the more discriminative setting.
+- `--dataset official` runs the probe over the five source datasets' official splits instead of the unified test split — matching stays within each dataset, and the summary table aggregates all queries (query-count weighted). MSMT17 dominates the runtime of this variant.
 - `--markdown` prints a paste-ready table; trailing `KEY VALUE` pairs override the config as usual.
 
 The `dmAP`/`dR1` columns are the drops versus the clean condition; compare models by the mean drop over the eight shifts and the absolute mAP under the worst shift (typically `warm`). `-ain` models are expected to show exactly 0.0000 drop under `dark-30%` and `contrast-40%` — token-IN removes uniform affine pixel changes mathematically. Gallery features are extracted once and reused, so a probe takes roughly 10 minutes for the OSNet tiers and ~30 minutes for ViT-B on an RTX 3070.

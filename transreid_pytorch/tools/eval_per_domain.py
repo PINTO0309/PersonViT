@@ -26,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 import torch
+from tqdm import tqdm
 
 from config import cfg
 from datasets import make_dataloader
@@ -39,7 +40,8 @@ def extract_features(model, val_loader, device='cuda'):
     feats = []
     model.eval()
     with torch.no_grad():
-        for img, pid, camid, camids, target_view, _ in val_loader:
+        for img, pid, camid, camids, target_view, _ in tqdm(
+                val_loader, desc='unified test features', dynamic_ncols=True, leave=False):
             img = img.to(device)
             camids_t = camids.to(device)
             target_view = target_view.to(device)

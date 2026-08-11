@@ -30,6 +30,7 @@ import numpy as np
 import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from config import cfg
 from datasets.bases import ImageDataset
@@ -38,6 +39,7 @@ from datasets.reid import REID
 from datasets.style_shift import CONDITIONS, StyleShift
 from model import make_model
 from tools.eval_cache import EvalCache, checkpoint_signature
+from tools.eval_official import OFFICIAL_DATASETS
 from utils.metrics import euclidean_distance, eval_func
 
 
@@ -50,7 +52,7 @@ def build_transforms(condition_fn):
     ])
 
 
-def extract(model, samples, transforms, device='cuda'):
+def extract(model, samples, transforms, device='cuda', desc='features'):
     loader = DataLoader(
         ImageDataset(samples, transforms),
         batch_size=cfg.TEST.IMS_PER_BATCH, shuffle=False,
@@ -59,7 +61,8 @@ def extract(model, samples, transforms, device='cuda'):
     feats = []
     model.eval()
     with torch.no_grad():
-        for img, pid, camid, camids, target_view, _ in loader:
+        for img, pid, camid, camids, target_view, _ in tqdm(
+                loader, desc=desc, dynamic_ncols=True, leave=False):
             feat = model(img.to(device), cam_label=camids.to(device),
                          view_label=target_view.to(device))
             feats.append(feat.detach().cpu())
@@ -75,6 +78,10 @@ def main():
     ap.add_argument('--weight', required=True, help='trained checkpoint (glob allowed)')
     ap.add_argument('--mode', choices=('query', 'all'), default='query',
                     help="'query': shift queries only (default); 'all': shift both sides")
+    ap.add_argument('--dataset', choices=('reid', 'official'), default='reid',
+                    help="'reid': unified test split (default); 'official': the five "
+                         "source datasets' official splits, matched within each "
+                         "dataset and summarized as one query-weighted table")
     ap.add_argument('--markdown', action='store_true',
                     help='print the results table in Markdown (paste-ready for README/docs)')
     ap.add_argument('--recompute', action='store_true',
@@ -103,6 +110,8 @@ def main():
     key = {'tool': 'eval_style_shift', 'checkpoint': checkpoint_signature(weight),
            'config': os.path.basename(args.config), 'mode': args.mode,
            'opts': args.opts}
+    if args.dataset != 'reid':  # keep pre-existing unified-split cache keys valid
+        key['dataset'] = args.dataset
     rows = cache.get(key)
     from_cache = rows is not None
 
@@ -111,27 +120,48 @@ def main():
         model.load_param(weight)
         model.to('cuda')
 
-        dataset = REID(root=cfg.DATASETS.ROOT_DIR, verbose=False)
-        q_pids = np.array([s[1] for s in dataset.query])
-        q_camids = np.array([s[2] for s in dataset.query])
-        g_pids = np.array([s[1] for s in dataset.gallery])
-        g_camids = np.array([s[2] for s in dataset.gallery])
+        if args.dataset == 'reid':
+            datasets = [('reid', REID(root=cfg.DATASETS.ROOT_DIR, verbose=False))]
+        else:
+            datasets = [(ds_name, loader(root=cfg.DATASETS.ROOT_DIR, verbose=False))
+                        for ds_name, loader in OFFICIAL_DATASETS.items()]
 
-        clean_gallery = extract(model, dataset.gallery, build_transforms(None))
+        # accumulate query-weighted sums per condition; matching stays within
+        # each dataset, so the aggregate equals the mean over all queries
+        totals = {name: [0.0, 0.0, 0] for name in CONDITIONS}
+        for ds_name, dataset in datasets:
+            q_pids = np.array([s[1] for s in dataset.query])
+            q_camids = np.array([s[2] for s in dataset.query])
+            g_pids = np.array([s[1] for s in dataset.gallery])
+            g_camids = np.array([s[2] for s in dataset.gallery])
 
-        rows = []
-        for name, fn in CONDITIONS.items():
-            transforms = build_transforms(fn)
-            qf = extract(model, dataset.query, transforms)
-            gf = (clean_gallery if args.mode == 'query' or fn is None
-                  else extract(model, dataset.gallery, transforms))
-            cmc, mAP = eval_func(euclidean_distance(qf, gf),
-                                 q_pids, g_pids, q_camids, g_camids)[:2]
-            rows.append({'condition': name, 'mAP': float(mAP), 'r1': float(cmc[0])})
-        cache.put(key, rows, log_lines=['mode   : {} shifted'.format(args.mode)]
+            clean_gallery = extract(model, dataset.gallery, build_transforms(None),
+                                    desc='{} gallery (clean)'.format(ds_name))
+
+            for name, fn in CONDITIONS.items():
+                transforms = build_transforms(fn)
+                qf = extract(model, dataset.query, transforms,
+                             desc='{} queries ({})'.format(ds_name, name))
+                gf = (clean_gallery if args.mode == 'query' or fn is None
+                      else extract(model, dataset.gallery, transforms,
+                                   desc='{} gallery ({})'.format(ds_name, name)))
+                cmc, mAP = eval_func(euclidean_distance(qf, gf),
+                                     q_pids, g_pids, q_camids, g_camids)[:2]
+                totals[name][0] += float(mAP) * len(q_pids)
+                totals[name][1] += float(cmc[0]) * len(q_pids)
+                totals[name][2] += len(q_pids)
+
+        rows = [{'condition': name,
+                 'mAP': totals[name][0] / totals[name][2],
+                 'r1': totals[name][1] / totals[name][2]}
+                for name in CONDITIONS]
+        cache.put(key, rows,
+                  log_lines=['dataset: {} / mode: {} shifted'.format(args.dataset, args.mode)]
                   + _render(rows, markdown=False))
 
     print('\nmodel  : {}'.format(weight))
+    print('dataset: {}'.format('unified reid test split' if args.dataset == 'reid'
+                               else 'official splits (query-weighted aggregate)'))
     print('mode   : {} shifted'.format('query only' if args.mode == 'query' else 'query+gallery'))
     if from_cache:
         print('cache  : reused from {}'.format(cache.path))

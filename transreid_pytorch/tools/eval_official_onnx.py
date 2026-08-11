@@ -30,6 +30,7 @@ import onnxruntime as ort
 import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from config import cfg
 from datasets.bases import ImageDataset
@@ -51,12 +52,13 @@ def build_session(onnx_path: str) -> ort.InferenceSession:
     return session
 
 
-def extract_features(session: ort.InferenceSession, loader) -> torch.Tensor:
+def extract_features(session: ort.InferenceSession, loader,
+                     desc='features') -> torch.Tensor:
     input_meta = session.get_inputs()[0]
     output_name = session.get_outputs()[0].name
     fixed_batch = isinstance(input_meta.shape[0], int)
     feats = []
-    for img, *_ in loader:
+    for img, *_ in tqdm(loader, desc=desc, dynamic_ncols=True, leave=False):
         batch = img.numpy()
         if fixed_batch and input_meta.shape[0] == 1:
             outputs = [
@@ -144,7 +146,7 @@ def main():
                 batch_size=cfg.TEST.IMS_PER_BATCH, shuffle=False,
                 num_workers=4, collate_fn=val_collate_fn,
             )
-            feats = extract_features(session, loader)
+            feats = extract_features(session, loader, desc='{} features'.format(name))
             if cfg.TEST.FEAT_NORM == 'yes':
                 feats = torch.nn.functional.normalize(feats, dim=1, p=2)
             num_query = len(dataset.query)

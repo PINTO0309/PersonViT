@@ -28,6 +28,7 @@ import numpy as np
 import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from config import cfg
 from datasets.bases import ImageDataset
@@ -50,11 +51,12 @@ OFFICIAL_DATASETS = {
 }
 
 
-def extract_features(model, loader, device='cuda'):
+def extract_features(model, loader, device='cuda', desc='features'):
     feats = []
     model.eval()
     with torch.no_grad():
-        for img, pid, camid, camids, target_view, _ in loader:
+        for img, pid, camid, camids, target_view, _ in tqdm(
+                loader, desc=desc, dynamic_ncols=True, leave=False):
             img = img.to(device)
             camids_t = camids.to(device)
             target_view = target_view.to(device)
@@ -143,7 +145,7 @@ def main():
                 batch_size=cfg.TEST.IMS_PER_BATCH, shuffle=False,
                 num_workers=4, collate_fn=val_collate_fn,
             )
-            feats = extract_features(model, loader)
+            feats = extract_features(model, loader, desc='{} features'.format(name))
             if cfg.TEST.FEAT_NORM == 'yes':
                 feats = torch.nn.functional.normalize(feats, dim=1, p=2)
             num_query = len(dataset.query)
