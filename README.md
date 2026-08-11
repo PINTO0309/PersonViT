@@ -406,7 +406,7 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
   | cuhk03np | 1,400 | 5,332 | 0.9873 | 0.9886 | 0.9929 | 0.9971 |
   | occ_reid | 1,000 | 1,000 | 0.9986 | 1.0000 | 1.0000 | 1.0000 |
 
-- official dataset style shift eval - query only shifted
+- official dataset style-shift eval - query only shifted
 
   | condition | mAP | R1 | dmAP | dR1 |
   | --- | ---: | ---: | ---: | ---: |
