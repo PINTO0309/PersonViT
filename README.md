@@ -198,6 +198,10 @@ python test.py --config_file configs/market/vit_small.yml \
   OUTPUT_DIR logs/market.vits.e0220.eval
 ```
 
+---
+---
+---
+
 ## Unified `reid` dataset
 
 [`transreid_pytorch/tools/build_unified_dataset.py`](transreid_pytorch/tools/build_unified_dataset.py)
