@@ -396,8 +396,14 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 
 #### B-ain-aug -  ViT-B/16 + token-IN - 86.5M
 
+- unified test set eval
+
+  | Var | Backbone | Params | GFLOPs<br>@256x128 | Emb | mAP | Rank-1 | Rank-5 | Rank-10 |
+  | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+  | B-ain-aug | ViT-B/16<br>+<br>token-IN | 86.5M | 11.35 | 768 | 93.4 | 96.9 | 98.1 | 98.6 |
+
 - official dataset eval
-    
+
   | dataset | queries | gallery | mAP | R1 | R5 | R10 |
   | --- | ---: | ---: | ---: | ---: | ---: | ---: |
   | market | 3,368 | 15,913 | 0.9857 | 0.9911 | 0.9979 | 0.9985 |
@@ -421,6 +427,12 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
   | gamma1.6 | 0.9388 | 0.9676 | -0.0112 | -0.0052 |
 
 #### S-ain-aug -  ViT-S/16 + token-IN - 22.0M
+
+- unified test set eval
+
+  | Var | Backbone | Params | GFLOPs<br>@256x128 | Emb | mAP | Rank-1 | Rank-5 | Rank-10 |
+  | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
+  | S-ain-aug | ViT-S/16<br>+<br>token-IN | 22.0M | 2.94 | 384 | 92.7 | 96.9 | 98.1 | 98.5 |
 
 - official dataset eval
 
