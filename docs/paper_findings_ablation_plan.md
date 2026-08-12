@@ -252,6 +252,27 @@ preserved). Trajectory as predicted: epoch-1 dip to 91.2 (initial distill
 loss ~18, reshaping toward the new teacher geometry), then a monotone
 climb through epoch 39.
 
+**CNN follow-up arms (P tier, all warm-started from the aug2 best 87.81):**
+the aug4 continuation plateaued ~1 mAP below aug2 with terminal
+relational-KD loss 0.77 (vs 0.43 under the old teacher; ViT-S reaches
+0.49 against the same new teacher), diagnosing a representational
+mismatch — the conv student lacks the global pairwise-relation modeling
+behind the L_cam teacher's geometry, and capacity is not the axis (P/N/T
+2.2-4.6M behaved identically in aug3). Three probes:
+
+- `osnet_p_8gb_distill_ain_relw10.yml` — anchor relaxed to REL_WEIGHT 10.
+- `osnet_p_8gb_distill_ain_nokd.yml` — anchor off (with aug4's REL 30
+  these form an anchor-strength gradient 30/10/none).
+- `osnet_p_8gb_distill_ain_attn{,_nokd}.yml` — architecture axis:
+  `osnet_ain_x1_0_attn` adds one bottlenecked residual self-attention
+  block after conv5 (512->128->512, 4 heads, +0.20M params, ~+4% MACs;
+  zero-gate identity at init, verified 0.0 diff loading the aug2 best).
+  Primary metric for the attn+REL30 arm is the terminal relational-KD
+  loss (success: well below 0.77, toward the ViT-S reference 0.49); the
+  learned gate magnitude is a secondary readout of how much attention the
+  model recruits. Adoption for any arm: >= 88.0 clean with official
+  splits agreeing and no style-shift regression.
+
 CNN aug3 findings (all three tiers identical): where the ViT student
 crossed its dip in 2 epochs, the small CNNs fell to ~81 mAP by epoch 5-10
 while reshaping toward the far-away new-teacher geometry and were still

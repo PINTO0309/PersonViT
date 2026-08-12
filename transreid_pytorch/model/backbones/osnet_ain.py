@@ -165,11 +165,45 @@ class OSBlockINin(nn.Module):
         return torch.relu(x3 + identity)
 
 
+class LiteSelfAttention(nn.Module):
+    """Bottlenecked residual self-attention over the final feature map.
+
+    OSNet builds local omni-scale features; this single block adds the
+    global pairwise-relation modeling the conv stack lacks (the structural
+    gap behind the CNN students' inability to match the ViT teacher's
+    similarity geometry). The 512 -> dim -> 512 bottleneck keeps it light
+    (~0.2M parameters at dim=128; 16x8 = 128 tokens, so the attention
+    matrix is tiny), and the zero-initialized scalar gate makes the block
+    an exact identity at initialization — trained checkpoints warm-start
+    unchanged, and the learned gate magnitude doubles as a readout of how
+    much attention the model recruits.
+    """
+
+    def __init__(self, channels, dim=128, num_heads=4):
+        super(LiteSelfAttention, self).__init__()
+        self.reduce = nn.Conv2d(channels, dim, 1, bias=False)
+        self.norm = nn.LayerNorm(dim)
+        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads,
+                                          batch_first=True)
+        self.expand = nn.Conv2d(dim, channels, 1, bias=False)
+        self.gate = nn.Parameter(torch.zeros(1))
+
+    def forward(self, x):
+        identity = x
+        x = self.reduce(x)
+        batch, dim, height, width = x.shape
+        x = x.flatten(2).transpose(1, 2)  # B, HW, dim
+        x = self.norm(x)
+        x, _ = self.attn(x, x, x, need_weights=False)
+        x = x.transpose(1, 2).reshape(batch, dim, height, width)
+        return identity + self.gate * self.expand(x)
+
+
 class OSNetAIN(nn.Module):
     """OSNet-AIN feature extractor with the TransReID backbone interface."""
 
     def __init__(self, channels=(64, 256, 384, 512), feature_dim=512,
-                 extra_blocks=(0, 0, 0)):
+                 extra_blocks=(0, 0, 0), attn_dim=None):
         super(OSNetAIN, self).__init__()
         self.conv1 = ConvLayer(3, channels[0], 7, stride=2, padding=3, IN=True)
         self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
@@ -201,6 +235,9 @@ class OSNetAIN(nn.Module):
             *[OSBlock(channels[3], channels[3]) for _ in range(extra_blocks[2])],
         )
         self.conv5 = Conv1x1(channels[3], channels[3])
+        # optional global-relation block between conv5 and GAP (identity at
+        # init via its zero gate; new keys only, so checkpoints warm-start)
+        self.attn = LiteSelfAttention(channels[3], attn_dim) if attn_dim else None
         self.global_avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
             nn.Linear(channels[3], feature_dim),
@@ -237,6 +274,8 @@ class OSNetAIN(nn.Module):
         x = self.pool3(x)
         x = self.conv4(x)
         x = self.conv5(x)
+        if self.attn is not None:
+            x = self.attn(x)
         x = self.global_avgpool(x)
         x = x.view(x.size(0), -1)
         return self.fc(x)
@@ -277,6 +316,20 @@ def osnet_ain_x1_5(**kwargs):
 
 def osnet_ain_x0_75(**kwargs):
     return OSNetAIN(channels=(48, 192, 288, 384), feature_dim=512)
+
+
+def osnet_ain_x1_0_attn(**kwargs):
+    # + one LiteSelfAttention block after conv5; warm-starts from plain
+    # osnet_ain_x1_0 checkpoints (identity at init via the zero gate)
+    return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512, attn_dim=128)
+
+
+def osnet_ain_x1_25_attn(**kwargs):
+    return OSNetAIN(channels=(80, 320, 480, 640), feature_dim=512, attn_dim=128)
+
+
+def osnet_ain_x1_5_attn(**kwargs):
+    return OSNetAIN(channels=(96, 384, 576, 768), feature_dim=512, attn_dim=128)
 
 
 def osnet_ain_x1_0_deep(**kwargs):
