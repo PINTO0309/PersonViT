@@ -9,6 +9,11 @@
 # toward the ViT-S reference 0.49); then clean mAP >= 88.0 with official
 # splits agreeing. Warm-starts from the undistorted aug2 best (87.81);
 # REL_WEIGHT stays 30 — the anchor is the probe here.
+# v2 note: the first run of this arm died silently — the zero gate
+# blocked all gradients into the block and weight decay eroded it to
+# zero (reduce.weight norm -> 0.0). Fixed by gate init 0.01 + weight
+# decay exemption for .attn. parameters; OUTPUT_DIR bumped to keep the
+# pathological run separate.
 MODEL:
   PRETRAIN_CHOICE: 'self'
   PRETRAIN_PATH: 'logs/reid_osnet_p_8gb_distill_ain_aug2/transformer_best_e000038_map0.87806.pth'
@@ -83,4 +88,4 @@ TEST:
   NECK_FEAT: 'before'
   FEAT_NORM: 'yes'
 
-OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_attn'
+OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_attn2'

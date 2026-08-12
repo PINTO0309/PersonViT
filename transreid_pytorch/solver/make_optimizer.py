@@ -11,6 +11,11 @@ def make_optimizer(cfg, model, center_criterion):
         if "bias" in key:
             lr = cfg.SOLVER.BASE_LR * cfg.SOLVER.BIAS_LR_FACTOR
             weight_decay = cfg.SOLVER.WEIGHT_DECAY_BIAS
+        if ".attn." in key:
+            # gated attention blocks receive no gradient while their gate is
+            # near zero; without this exemption weight decay erodes them to
+            # zero before they can be recruited (observed: attn_nokd arm)
+            weight_decay = 0.0
         if cfg.SOLVER.LARGE_FC_LR:
             if "classifier" in key or "arcface" in key:
                 lr = cfg.SOLVER.BASE_LR * 2

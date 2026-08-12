@@ -5,6 +5,11 @@
 # standalone value of global-relation modeling for the CNN (ID + triplet
 # + L_cam + aug only). Warm-starts from the aug2 best (87.81). Success
 # bar: >= 88.0 with official splits agreeing (the NPO lesson).
+# v2 note: the first run of this arm died silently — the zero gate
+# blocked all gradients into the block and weight decay eroded it to
+# zero (reduce.weight norm -> 0.0). Fixed by gate init 0.01 + weight
+# decay exemption for .attn. parameters; OUTPUT_DIR bumped to keep the
+# pathological run separate.
 MODEL:
   PRETRAIN_CHOICE: 'self'
   PRETRAIN_PATH: 'logs/reid_osnet_p_8gb_distill_ain_aug2/transformer_best_e000038_map0.87806.pth'
@@ -79,4 +84,4 @@ TEST:
   NECK_FEAT: 'before'
   FEAT_NORM: 'yes'
 
-OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_attn_nokd'
+OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_attn_nokd2'

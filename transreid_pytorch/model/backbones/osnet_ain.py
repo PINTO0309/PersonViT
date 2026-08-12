@@ -192,7 +192,13 @@ class LiteSelfAttention(nn.Module):
         self.qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
         self.expand = nn.Conv2d(dim, channels, 1, bias=False)
-        self.gate = nn.Parameter(torch.zeros(1))
+        # small non-zero init: an exactly-zero gate blocks every gradient
+        # into the block (bootstrap deadlock; with weight decay the unused
+        # weights then decay to zero — observed in the attn_nokd arm). 0.01
+        # perturbs the warm-started output by ~0.006 while letting the
+        # internals train from step one. Weight decay is additionally
+        # disabled for '.attn.' parameters in solver/make_optimizer.py.
+        self.gate = nn.Parameter(torch.full((1,), 0.01))
 
     def forward(self, x):
         identity = x

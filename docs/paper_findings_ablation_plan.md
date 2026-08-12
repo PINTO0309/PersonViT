@@ -287,6 +287,22 @@ student-side L_cam alone adds ~0 clean mAP for the CNN (vs +1.05 on
 ViT) — consistent with the missing global-relation modeling that the
 attention arms probe.
 
+**attn_nokd v1 result — the block died, not failed:** the run matched the
+plain nokd arm exactly (final ~87.9), and the checkpoint shows why:
+`gate = -1e-41`, `reduce.weight` norm **0.0**. An exactly-zero gate blocks
+every gradient into the block (only the scalar gate itself receives a
+gradient, proportional to the near-zero correlation between the random
+attention output and the loss gradient), and weight decay (5e-4) eroded
+the waiting parameters to zero — a bootstrap deadlock, so the arm says
+nothing about attention's value. Design lesson recorded honestly: the
+scalar zero-gate (adopted from the ChatGPT-proposed design) is fragile
+here; a zero-initialized output projection would have received a
+full-rank gradient at init. Fix applied for the v2 reruns: gate init
+0.01 (output perturbation ~0.008, warm start effectively preserved) plus
+a weight-decay exemption for `.attn.` parameters in make_optimizer;
+OUTPUT_DIRs bumped to `..._attn2` / `..._attn_nokd2`. The REL-30 attn arm
+must not be run (or re-run) without this fix.
+
 CNN aug3 findings (all three tiers identical): where the ViT student
 crossed its dip in 2 epochs, the small CNNs fell to ~81 mAP by epoch 5-10
 while reshaping toward the far-away new-teacher geometry and were still
