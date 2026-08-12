@@ -181,10 +181,16 @@ class LiteSelfAttention(nn.Module):
 
     def __init__(self, channels, dim=128, num_heads=4):
         super(LiteSelfAttention, self).__init__()
+        # attention is written out with plain matmul/softmax instead of
+        # nn.MultiheadAttention: the latter takes the fused
+        # aten::_native_multi_head_attention fast path in eval mode, which
+        # has no ONNX opset-17 export
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
         self.reduce = nn.Conv2d(channels, dim, 1, bias=False)
         self.norm = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(embed_dim=dim, num_heads=num_heads,
-                                          batch_first=True)
+        self.qkv = nn.Linear(dim, dim * 3)
+        self.proj = nn.Linear(dim, dim)
         self.expand = nn.Conv2d(dim, channels, 1, bias=False)
         self.gate = nn.Parameter(torch.zeros(1))
 
@@ -192,9 +198,19 @@ class LiteSelfAttention(nn.Module):
         identity = x
         x = self.reduce(x)
         batch, dim, height, width = x.shape
-        x = x.flatten(2).transpose(1, 2)  # B, HW, dim
+        tokens = height * width
+        x = x.flatten(2).transpose(1, 2)  # B, T, dim
         x = self.norm(x)
-        x, _ = self.attn(x, x, x, need_weights=False)
+        # rank-4 head split only (the OSNet export contract forbids the
+        # rank-5 qkv transpose that identifies ViT graphs)
+        query, key, value = self.qkv(x).chunk(3, dim=-1)  # each B, T, dim
+        query = query.reshape(batch, tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        key = key.reshape(batch, tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        value = value.reshape(batch, tokens, self.num_heads, self.head_dim).transpose(1, 2)
+        scores = query @ key.transpose(-2, -1) / (self.head_dim ** 0.5)
+        x = scores.softmax(dim=-1) @ value  # B, heads, T, head_dim
+        x = x.transpose(1, 2).reshape(batch, tokens, dim)
+        x = self.proj(x)
         x = x.transpose(1, 2).reshape(batch, dim, height, width)
         return identity + self.gate * self.expand(x)
 

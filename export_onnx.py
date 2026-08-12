@@ -53,6 +53,18 @@ TOKEN_BATCH_SYMBOL = f"{TOKEN_COUNT}N"
 PIXEL_MEAN = (0.5, 0.5, 0.5)
 PIXEL_STD = (0.5, 0.5, 0.5)
 
+# The `_attn` OSNet variants append one LiteSelfAttention block (bottleneck
+# dim 128, 4 heads) over the 16x8 final feature map. Its Gemm-form graph
+# carries seven constant Reshapes per block on top of the single OSNet
+# flatten, and one fused batch*token axis analogous to the ViT `129N`.
+OSNET_MAP_HEIGHT = IMAGE_HEIGHT // 16
+OSNET_MAP_WIDTH = IMAGE_WIDTH // 16
+OSNET_TOKEN_COUNT = OSNET_MAP_HEIGHT * OSNET_MAP_WIDTH
+OSNET_TOKEN_BATCH_SYMBOL = f"{OSNET_TOKEN_COUNT}N"
+ATTN_DIM = 128
+ATTN_HEADS = 4
+ATTN_HEAD_DIM = ATTN_DIM // ATTN_HEADS
+
 
 @dataclass(frozen=True)
 class ReleasedModel:
@@ -72,6 +84,9 @@ class ReleasedModel:
     # -ain variants keep InstanceNormalization at inference (it normalizes at
     # runtime and cannot be folded); the exact node count is pinned here.
     instance_norm_nodes: int = 0
+    # LiteSelfAttention blocks in `_attn` OSNet variants (adds Softmax, one
+    # extra Gemm, and seven classified Reshapes per block).
+    attention_blocks: int = 0
 
 
 def _released_model(
@@ -480,6 +495,7 @@ def validate_dynamic_value_info(
             if dimension.dim_param and dimension.dim_param not in (
                 "N",
                 TOKEN_BATCH_SYMBOL,
+                OSNET_TOKEN_BATCH_SYMBOL,
             ):
                 invalid_symbols.append((value.name, dimension.dim_param))
     if invalid_values:
@@ -558,6 +574,9 @@ def materialize_dynamic_value_info(
                     elif fixed_dimension == TOKEN_COUNT:
                         # the Gemm-form token flatten: N*TOKEN_COUNT elements
                         axis_symbols[axis] = TOKEN_BATCH_SYMBOL
+                    elif spec.attention_blocks and fixed_dimension == OSNET_TOKEN_COUNT:
+                        # the attn token flatten: N*OSNET_TOKEN_COUNT elements
+                        axis_symbols[axis] = OSNET_TOKEN_BATCH_SYMBOL
                     else:
                         raise RuntimeError(
                             f"Cannot prove {value.name} axis {axis} is batch: "
@@ -986,56 +1005,147 @@ def validate_reshape_shapes(
         )
 
 
+OSNET_ATTN_RESHAPE_COUNTS = {
+    "attn_tokens_3d": 2,       # spatial flatten + token unflatten [b, 128, 128]
+    "attn_head_split": 3,      # q/k/v [b, tokens, heads, head_dim]
+    "attn_token_flatten": 1,   # Gemm-form fused batch*token axis [-1, dim]
+    "attn_spatial_restore": 1,  # [b, dim, 16, 8]
+    "flatten": 1,              # the original GAP flatten [b, channels]
+}
+
+
+def _classify_osnet_reshape(
+    values: np.ndarray,
+    spec: ReleasedModel,
+    node_name: str,
+    flatten_channels: int,
+) -> tuple[str, np.ndarray, np.ndarray]:
+    """Classify a constant Reshape of the (optionally attn-carrying) OSNet
+    graph, returning the class plus canonical (fixed, dynamic) targets."""
+
+    entries = values.tolist()
+    if len(entries) == 2 and entries[1] == ATTN_DIM and entries[0] in (
+            -1, OSNET_TOKEN_COUNT):
+        return (
+            "attn_token_flatten",
+            np.asarray([OSNET_TOKEN_COUNT, ATTN_DIM], dtype=np.int64),
+            np.asarray([-1, ATTN_DIM], dtype=np.int64),
+        )
+    if len(entries) == 2 and entries[0] in (1, -1):
+        return (
+            "flatten",
+            np.asarray([1, flatten_channels], dtype=np.int64),
+            np.asarray([-1, flatten_channels], dtype=np.int64),
+        )
+    if (
+        len(entries) == 3
+        and entries[0] in (1, -1)
+        and entries[1] == ATTN_DIM
+        and entries[2] in (-1, OSNET_TOKEN_COUNT)
+    ):
+        return (
+            "attn_tokens_3d",
+            np.asarray([1, ATTN_DIM, OSNET_TOKEN_COUNT], dtype=np.int64),
+            np.asarray([-1, ATTN_DIM, OSNET_TOKEN_COUNT], dtype=np.int64),
+        )
+    if len(entries) == 4 and entries[1:] == [
+            OSNET_TOKEN_COUNT, ATTN_HEADS, ATTN_HEAD_DIM] and entries[0] in (1, -1):
+        return (
+            "attn_head_split",
+            np.asarray([1, OSNET_TOKEN_COUNT, ATTN_HEADS, ATTN_HEAD_DIM],
+                       dtype=np.int64),
+            np.asarray([-1, OSNET_TOKEN_COUNT, ATTN_HEADS, ATTN_HEAD_DIM],
+                       dtype=np.int64),
+        )
+    if len(entries) == 4 and entries[1:] == [
+            ATTN_DIM, OSNET_MAP_HEIGHT, OSNET_MAP_WIDTH] and entries[0] in (1, -1):
+        return (
+            "attn_spatial_restore",
+            np.asarray([1, ATTN_DIM, OSNET_MAP_HEIGHT, OSNET_MAP_WIDTH],
+                       dtype=np.int64),
+            np.asarray([-1, ATTN_DIM, OSNET_MAP_HEIGHT, OSNET_MAP_WIDTH],
+                       dtype=np.int64),
+        )
+    raise RuntimeError(
+        f"Unclassifiable OSNet Reshape target for {spec.key} at {node_name}: "
+        f"{entries}"
+    )
+
+
+def _osnet_flatten_channels(
+    model: onnx.ModelProto,
+    spec: ReleasedModel,
+) -> int:
+    """Channel count of the GAP flatten, from the fc Gemm it feeds."""
+
+    initializers = _initializer_map(model)
+    gemm_by_input = {
+        node.input[0]: node for node in model.graph.node if node.op_type == "Gemm"
+    }
+    for node in model.graph.node:
+        if node.op_type != "Reshape":
+            continue
+        gemm = gemm_by_input.get(node.output[0])
+        if gemm is None:
+            continue
+        weight = initializers.get(gemm.input[1])
+        if weight is None:
+            raise RuntimeError(f"fc Gemm weight is not constant for {spec.key}")
+        trans_b = _node_attribute_or_default(gemm, "transB", 0)
+        channels = int(weight.dims[1] if trans_b else weight.dims[0])
+        if channels != ATTN_DIM:  # the attn token flatten also feeds a Gemm
+            return channels
+    raise RuntimeError(f"Cannot locate the fc Gemm flatten for {spec.key}")
+
+
+def _expected_osnet_reshape_counts(spec: ReleasedModel) -> dict[str, int]:
+    blocks = spec.attention_blocks
+    return {
+        "attn_tokens_3d": 2 * blocks,
+        "attn_head_split": 3 * blocks,
+        "attn_token_flatten": blocks,
+        "attn_spatial_restore": blocks,
+        "flatten": 1,
+    }
+
+
 def set_reshape_shapes_osnet(
     model: onnx.ModelProto,
     spec: ReleasedModel,
     batch_dimension: int,
 ) -> None:
-    """Rewrite the single OSNet flatten Reshape, reserving -1 for batch only.
+    """Rewrite every constant OSNet Reshape, reserving -1 for batch only.
 
-    The OSNet graph contains exactly one Reshape: the global-average-pooled
-    feature map flattened to ``[batch, channels]`` before the fc projection.
-    All non-batch dimensions stay explicit; ``-1`` is used exclusively for the
-    leading batch axis of the dynamic model.
+    The plain OSNet graph contains exactly one Reshape (the global-average-
+    pooled feature map flattened to ``[batch, channels]``); the `_attn`
+    variants add seven classified attention Reshapes per block. All non-batch
+    dimensions become explicit; ``-1`` remains only on the leading axis of
+    dynamic targets (which for the fused batch*token flatten carries
+    ``N*OSNET_TOKEN_COUNT`` elements).
     """
 
     if batch_dimension not in (1, -1):
         raise ValueError(f"Unsupported Reshape batch dimension: {batch_dimension}")
     initializers = _initializer_map(model)
     reshape_nodes = [node for node in model.graph.node if node.op_type == "Reshape"]
-    if len(reshape_nodes) != 1:
+    flatten_channels = _osnet_flatten_channels(model, spec)
+    counts: dict[str, int] = dict.fromkeys(OSNET_ATTN_RESHAPE_COUNTS, 0)
+    for node in reshape_nodes:
+        initializer = initializers.get(node.input[1])
+        if initializer is None:
+            raise RuntimeError(f"Reshape shape is not constant: {node.name}")
+        current = numpy_helper.to_array(initializer)
+        klass, fixed, dynamic = _classify_osnet_reshape(
+            current, spec, node.name, flatten_channels)
+        counts[klass] += 1
+        _replace_initializer(
+            initializer, dynamic if batch_dimension == -1 else fixed)
+    expected = _expected_osnet_reshape_counts(spec)
+    if counts != expected:
         raise RuntimeError(
-            f"Expected 1 flatten Reshape for {spec.key}, found {len(reshape_nodes)}"
+            f"Unexpected OSNet Reshape census for {spec.key}: {counts}, "
+            f"expected {expected}"
         )
-    node = reshape_nodes[0]
-    initializer = initializers.get(node.input[1])
-    if initializer is None:
-        raise RuntimeError(f"Reshape shape is not constant: {node.name}")
-    current = numpy_helper.to_array(initializer)
-    if current.ndim != 1 or current.size != 2:
-        raise RuntimeError(f"Unexpected flatten Reshape rank for {node.name}: {current}")
-    channels = int(current[1])
-    if channels <= 0:
-        # The tracer emits [1, -1]; make the channel count explicit from the
-        # fc Gemm weight so -1 stays reserved for the batch axis only.
-        gemm_nodes = [n for n in model.graph.node if n.op_type == "Gemm"]
-        if len(gemm_nodes) != 1 or gemm_nodes[0].input[0] != node.output[0]:
-            raise RuntimeError(
-                f"Cannot locate the fc Gemm fed by {node.name} for {spec.key}"
-            )
-        weight = initializers.get(gemm_nodes[0].input[1])
-        if weight is None:
-            raise RuntimeError(f"fc Gemm weight is not constant for {spec.key}")
-        trans_b = _node_attribute_or_default(gemm_nodes[0], "transB", 0)
-        channels = int(weight.dims[1] if trans_b else weight.dims[0])
-    if channels <= 0:
-        raise RuntimeError(
-            f"Cannot determine the flatten channel count for {node.name}"
-        )
-    _replace_initializer(
-        initializer,
-        np.asarray([batch_dimension, channels], dtype=np.int64),
-    )
 
 
 def validate_reshape_shapes_osnet(
@@ -1043,28 +1153,39 @@ def validate_reshape_shapes_osnet(
     spec: ReleasedModel,
     dynamic_batch: bool,
 ) -> None:
-    """Reject zero/non-leading inferred dimensions in the flatten Reshape."""
+    """Validate every OSNet Reshape against its canonical classified target."""
 
-    expected_batch = -1 if dynamic_batch else 1
     initializers = _initializer_map(model)
     reshape_nodes = [node for node in model.graph.node if node.op_type == "Reshape"]
-    if len(reshape_nodes) != 1:
+    flatten_channels = _osnet_flatten_channels(model, spec)
+    counts: dict[str, int] = dict.fromkeys(OSNET_ATTN_RESHAPE_COUNTS, 0)
+    for node in reshape_nodes:
+        initializer = initializers.get(node.input[1])
+        if initializer is None:
+            raise RuntimeError(f"Reshape shape is not constant: {node.name}")
+        actual = numpy_helper.to_array(initializer)
+        klass, fixed, dynamic = _classify_osnet_reshape(
+            actual, spec, node.name, flatten_channels)
+        counts[klass] += 1
+        expected = dynamic if dynamic_batch else fixed
+        if not np.array_equal(actual, expected):
+            raise RuntimeError(
+                f"Unexpected Reshape shape for {node.name}: "
+                f"{actual.tolist()}, expected {expected.tolist()}"
+            )
+        if np.any(actual == 0):
+            raise RuntimeError(f"Reshape shape contains 0 for {node.name}")
+        inferred_axes = np.flatnonzero(actual == -1).tolist()
+        expected_inferred_axes = [0] if dynamic_batch else []
+        if inferred_axes != expected_inferred_axes:
+            raise RuntimeError(
+                f"Invalid inferred Reshape axes for {node.name}: {inferred_axes}"
+            )
+    expected_counts = _expected_osnet_reshape_counts(spec)
+    if counts != expected_counts:
         raise RuntimeError(
-            f"Expected 1 flatten Reshape for {spec.key}, found {len(reshape_nodes)}"
-        )
-    node = reshape_nodes[0]
-    initializer = initializers.get(node.input[1])
-    if initializer is None:
-        raise RuntimeError(f"Reshape shape is not constant: {node.name}")
-    actual = numpy_helper.to_array(initializer)
-    if actual.ndim != 1 or actual.size != 2:
-        raise RuntimeError(f"Unexpected flatten Reshape rank for {node.name}: {actual}")
-    if np.any(actual == 0):
-        raise RuntimeError(f"Reshape shape contains 0 for {node.name}")
-    if int(actual[0]) != expected_batch or int(actual[1]) <= 0:
-        raise RuntimeError(
-            f"Unexpected flatten Reshape shape for {node.name}: {actual.tolist()}, "
-            f"expected [{expected_batch}, <channels>]"
+            f"Unexpected OSNet Reshape census for {spec.key}: {counts}, "
+            f"expected {expected_counts}"
         )
 
 
@@ -1180,10 +1301,18 @@ def validate_osnet_structure(
             f"for {spec.key}, found {len(instance_norm_nodes)}"
         )
 
+    expected_gemms = 1 + spec.attention_blocks
     gemm_nodes = [node for node in model.graph.node if node.op_type == "Gemm"]
-    if len(gemm_nodes) != 1:
+    if len(gemm_nodes) != expected_gemms:
         raise RuntimeError(
-            f"Expected 1 fc Gemm for {spec.key}, found {len(gemm_nodes)}"
+            f"Expected {expected_gemms} Gemm nodes for {spec.key}, "
+            f"found {len(gemm_nodes)}"
+        )
+    softmax_nodes = [node for node in model.graph.node if node.op_type == "Softmax"]
+    if len(softmax_nodes) != spec.attention_blocks:
+        raise RuntimeError(
+            f"Expected {spec.attention_blocks} Softmax nodes for {spec.key}, "
+            f"found {len(softmax_nodes)}"
         )
     pool_nodes = [
         node for node in model.graph.node if node.op_type == "GlobalAveragePool"
