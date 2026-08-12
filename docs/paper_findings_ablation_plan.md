@@ -273,6 +273,20 @@ behind the L_cam teacher's geometry, and capacity is not the axis (P/N/T
   model recruits. Adoption for any arm: >= 88.0 clean with official
   splits agreeing and no style-shift regression.
 
+**nokd arm result (P, 100 ep, judged on the final state — the "best" file
+is the epoch-1 pre-dip artifact):** dips to 85.6 by epoch 5-10 even with
+NO teacher anchor, recovers to **87.8-87.9** ≈ the aug2 level; Cam loss
+converges healthily (3.3 -> 0.87). Gate (>= 88.0) missed -> not adopted.
+Two corrections to the running interpretation: (a) the dip is a *generic
+re-convergence transient* (fresh Adam 1e-4 + strong aug + L_cam on a
+converged small CNN), not teacher-driven as first assumed; (b) the anchor
+harm still stands, now via endpoints — from the same dip, no-anchor
+recovers to 87.8 in 100 ep while the REL-30 new-teacher anchor caps
+recovery at ~86.7 after 140 ep (terminal relational-KD 0.77). Also:
+student-side L_cam alone adds ~0 clean mAP for the CNN (vs +1.05 on
+ViT) — consistent with the missing global-relation modeling that the
+attention arms probe.
+
 CNN aug3 findings (all three tiers identical): where the ViT student
 crossed its dip in 2 epochs, the small CNNs fell to ~81 mAP by epoch 5-10
 while reshaping toward the far-away new-teacher geometry and were still
