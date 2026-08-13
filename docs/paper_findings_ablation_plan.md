@@ -405,8 +405,17 @@ zeros preserved); officials 4 up / 1 saturated-flat (msmt17 **+1.18**,
 duke_occ +0.60, market +0.25, cuhk03np +0.11, occ_reid -0.10 at
 ceiling). JPEG augmentation acted as a general regularizer, not just
 compression hardening. New B flagship:
-`logs/reid_vit_base_8gb_ain_aug2_cam_jpeg/transformer_best_e000040_map0.93500.pth`;
-whether to re-distill S from it awaits the S jpeg arm's own result.
+`logs/reid_vit_base_8gb_ain_aug2_cam_jpeg/transformer_best_e000040_map0.93500.pth`.
+
+**S arm result — ADOPTED on all four gates** (run combined JPEG aug with
+the upgraded B-jpeg teacher; baseline S-ain-aug2): clean 92.68 ->
+**92.95**; jpeg-q20 -3.00 -> **-1.56** (q40 -0.97 -> -0.60); eight
+photometric conditions improved or held (warm -4.45 -> -3.82, mean-8
+1.45 -> 1.35, exact zeros preserved); officials 4 up / 1 ceiling-flat
+(msmt17 +0.92, duke_occ +0.78, market +0.25, cuhk03np +0.11). New S
+flagship:
+`logs/reid_vit_small_8gb_distill_ain_aug2_jpeg/transformer_best_e000037_map0.92954.pth`.
+CNN jpeg arms (P/N/T, unchanged aug2 recipe/teacher) still pending.
 
 ## Measurement checklist per arm
 

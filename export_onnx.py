@@ -197,9 +197,9 @@ AIN_AUG_MODELS = (
         key="s-ain-aug",
         dataset="unified",
         architecture="ViT-S/16",
-        config="transreid_pytorch/configs/reid/vit_small_8gb_distill_ain_aug2.yml",
+        config="transreid_pytorch/configs/reid/vit_small_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_vit_small_8gb_distill_ain_aug2/"
+            "transreid_pytorch/logs/reid_vit_small_8gb_distill_ain_aug2_jpeg/"
             "transformer_best_*.pth"
         ),
         output="personvit_vits16_ain_unified_aug.onnx",
