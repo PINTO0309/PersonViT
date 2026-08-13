@@ -183,9 +183,9 @@ AIN_AUG_MODELS = (
         key="b-ain-aug",
         dataset="unified",
         architecture="ViT-B/16",
-        config="transreid_pytorch/configs/reid/vit_base_8gb_ain_aug2_cam.yml",
+        config="transreid_pytorch/configs/reid/vit_base_8gb_ain_aug2_cam_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_vit_base_8gb_ain_aug2_cam/"
+            "transreid_pytorch/logs/reid_vit_base_8gb_ain_aug2_cam_jpeg/"
             "transformer_best_*.pth"
         ),
         output="personvit_vitb16_ain_unified_aug.onnx",
