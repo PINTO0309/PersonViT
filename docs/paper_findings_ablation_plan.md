@@ -303,6 +303,30 @@ a weight-decay exemption for `.attn.` parameters in make_optimizer;
 OUTPUT_DIRs bumped to `..._attn2` / `..._attn_nokd2`. The REL-30 attn arm
 must not be run (or re-run) without this fix.
 
+**Attention line closed (pre-registered probe verdict):** with the
+bootstrap fix in place (gate alive, internals training — qkv norms grew
+to 7-23 across runs), both attention variants failed both decision
+signals:
+
+- attn2 (dim 128, REL 30, judged at e21): distill curve identical to the
+  attention-free aug3 at every epoch (e10 1.77 vs 1.75, e20 1.04 vs
+  1.03); gate self-suppressed 0.035 -> 0.005.
+- attn_full (native 512-dim, 8 heads, 30-ep probe, judged at e20):
+  distill still above the aug3 reference (e20 1.067 vs 1.034) despite a
+  lower-LR advantage from its shorter schedule; gate grew to 0.067 by e5,
+  then collapsed to 0.013 — the same self-suppression, delayed.
+- attn_nokd2 (no teacher, control): tracked the plain nokd arm exactly
+  (e20 86.1 vs 86.2); without a relational loss there is nothing for
+  attention to serve.
+
+Conclusion: under relational-KD pressure the model consistently chooses
+NOT to mix in attention output, at any width. The CNN's inability to
+match the L_cam teacher geometry is **not** missing global-relation
+modeling; the remaining suspects are deeper (student embedding width 512
+vs teacher 768, conv feature statistics). CNN-tier outcome now rests on
+the relw10 arm; if it fails its gate, the CNN tiers finalize on the aug2
+lineage and the L_cam benefit remains ViT-only.
+
 CNN aug3 findings (all three tiers identical): where the ViT student
 crossed its dip in 2 epochs, the small CNNs fell to ~81 mAP by epoch 5-10
 while reshaping toward the far-away new-teacher geometry and were still
