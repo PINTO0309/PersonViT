@@ -339,6 +339,26 @@ the aug4 configs continue from the aug3 *final* states
 bar: beat the aug2 bests (P 87.81 / N 88.44 / T 88.61); otherwise the CNN
 tiers keep the aug2 lineage as final.
 
+## Phase 3 final conclusion
+
+The remaining CNN probes (`relw10`, and the aug4 continuations for N/T)
+were **rejected by decision** without awaiting completion: after aug4-P
+plateaued below aug2, the no-anchor arm topped out at parity, and both
+attention probes failed their pre-registered signals, the expected value
+of the remaining arms no longer justified their GPU time.
+
+Final state of the ladder:
+
+- **ViT tiers carry the L_cam lineage**: B-ain-aug2-cam (93.36, probe
+  mean drop 1.3) as teacher and deployment flagship; S-ain-aug2 (92.68,
+  mean drop 1.4). The paper-component campaign's net win is L_cam, worth
+  ~+1.05 clean with improved robustness on both ViT tiers.
+- **CNN tiers finalize on the aug2 lineage** (the documented fallback):
+  P 87.81 / N 88.44 / T 88.61. The L_cam teacher geometry is not
+  representable by the OSNet students at any probed anchor strength or
+  attention width; their README rows and ONNX artifacts already reflect
+  this lineage.
+
 ## JPEG-compression exposure (measured before any training)
 
 Following the NPO lesson (build the measuring stick first), the probe
