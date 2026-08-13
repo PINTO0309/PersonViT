@@ -6,6 +6,10 @@
 # P -1.4/-5.2. Adoption gates: jpeg-q20 drop clearly reduced, clean
 # within -0.1, the other 8 probe conditions non-regressed, official
 # splits agreeing. Teacher/recipe otherwise identical to the lineage.
+# Teacher upgraded to the JPEG-adopted B flagship (B-ain-aug2-cam-jpeg,
+# 93.50): its targets are computed on the same JPEG-augmented input
+# distribution this run trains on, so the distillation signal stays
+# consistent with the augmentation.
 MODEL:
   PRETRAIN_CHOICE: 'self'
   PRETRAIN_PATH: 'logs/reid_vit_small_8gb_distill_ain_aug2/transformer_best_e000039_map0.92682.pth'
@@ -52,8 +56,8 @@ CAMPROXY:
 
 DISTILL:
   ENABLED: True
-  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_aug2_cam.yml'
-  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_aug2_cam/transformer_best_*.pth'
+  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_aug2_cam_jpeg.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_aug2_cam_jpeg/transformer_best_*.pth'
   LOGIT_WEIGHT: 1.0
   REL_WEIGHT: 30.0
   EMBED_WEIGHT: 0.0

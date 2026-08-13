@@ -397,6 +397,17 @@ lineage decision stands; JPEG is the only delta everywhere. Adoption
 gates: jpeg-q20 drop clearly reduced, clean within -0.1, the other 8
 probe conditions non-regressed, official splits agreeing.
 
+**B arm result — ADOPTED on all four gates** (baseline B-ain-aug2-cam):
+clean 93.36 -> **93.50**; jpeg-q20 drop -2.41 -> **-1.32** (q40 -0.71 ->
+-0.43); the eight photometric conditions improved or held (warm
+-4.30 -> -3.77, contrast+ -3.36 -> -3.15, mean-8 1.31 -> 1.26, exact
+zeros preserved); officials 4 up / 1 saturated-flat (msmt17 **+1.18**,
+duke_occ +0.60, market +0.25, cuhk03np +0.11, occ_reid -0.10 at
+ceiling). JPEG augmentation acted as a general regularizer, not just
+compression hardening. New B flagship:
+`logs/reid_vit_base_8gb_ain_aug2_cam_jpeg/transformer_best_e000040_map0.93500.pth`;
+whether to re-distill S from it awaits the S jpeg arm's own result.
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
