@@ -113,6 +113,8 @@ def main():
     if args.dataset != 'reid':  # keep pre-existing unified-split cache keys valid
         key['dataset'] = args.dataset
     rows = cache.get(key)
+    if rows is not None and {row['condition'] for row in rows} != set(CONDITIONS):
+        rows = None  # the condition set grew since this entry was cached
     from_cache = rows is not None
 
     if rows is None:

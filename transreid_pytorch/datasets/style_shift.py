@@ -24,6 +24,16 @@ def _gamma(y):
     return lambda x: x.clamp(min=1e-6) ** y
 
 
+def _jpeg(quality):
+    # deterministic JPEG round-trip: blocking/ringing artifacts of
+    # transcoded surveillance streams (8x8 DCT blocks vs 16x16 ViT patches)
+    def fn(x):
+        from torchvision.io import decode_jpeg, encode_jpeg
+        u8 = (x * 255.0).round().clamp(0, 255).to(torch.uint8)
+        return decode_jpeg(encode_jpeg(u8, quality=quality)).float() / 255.0
+    return fn
+
+
 # deterministic photometric shifts applied on the [0, 1] tensor
 CONDITIONS = {
     'clean': None,
@@ -35,6 +45,8 @@ CONDITIONS = {
     'cool': _channel_gain(0.8, 1.0, 1.25),
     'gamma0.6': _gamma(0.6),
     'gamma1.6': _gamma(1.6),
+    'jpeg-q40': _jpeg(40),
+    'jpeg-q20': _jpeg(20),
 }
 
 

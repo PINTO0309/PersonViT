@@ -339,6 +339,27 @@ the aug4 configs continue from the aug3 *final* states
 bar: beat the aug2 bests (P 87.81 / N 88.44 / T 88.61); otherwise the CNN
 tiers keep the aug2 lineage as final.
 
+## JPEG-compression exposure (measured before any training)
+
+Following the NPO lesson (build the measuring stick first), the probe
+gained two deterministic JPEG round-trip conditions (`jpeg-q40`,
+`jpeg-q20`) and the flagships were measured before considering a
+training-side JPEG augmentation:
+
+| Model | jpeg-q40 | jpeg-q20 | (worst existing: warm) |
+| --- | ---: | ---: | ---: |
+| B-ain-aug2-cam | -0.71 | -2.41 | -4.30 |
+| S-ain-aug2 | -0.97 | -3.00 | -4.45 |
+| P-ain-aug2 | -1.40 | -5.17 | -9.00 |
+
+Verdict: at realistic stream qualities (q40) the exposure is ~1 point,
+JPEG is not the worst axis for any tier (color temperature still
+dominates), and no ViT-patch/DCT-block interaction appeared. The
+training-side JPEG arm is **deferred** — worthwhile only if a deployment
+is known to use aggressive compression (q<=30). The probe conditions
+remain in place (usable as `SOLVER.VAL_SHIFT` too), and the probe cache
+invalidates itself when the condition set grows.
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
