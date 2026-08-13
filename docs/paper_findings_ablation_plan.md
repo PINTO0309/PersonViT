@@ -374,11 +374,28 @@ training-side JPEG augmentation:
 
 Verdict: at realistic stream qualities (q40) the exposure is ~1 point,
 JPEG is not the worst axis for any tier (color temperature still
-dominates), and no ViT-patch/DCT-block interaction appeared. The
-training-side JPEG arm is **deferred** — worthwhile only if a deployment
-is known to use aggressive compression (q<=30). The probe conditions
-remain in place (usable as `SOLVER.VAL_SHIFT` too), and the probe cache
-invalidates itself when the condition set grows.
+dominates), and no ViT-patch/DCT-block interaction appeared. The probe
+conditions remain in place (usable as `SOLVER.VAL_SHIFT` too), and the
+probe cache invalidates itself when the condition set grows.
+
+**Training-side JPEG ablation (decision: run it).** Five arms, one per
+tier, each warm-starting the tier's FINAL-lineage best and changing
+exactly one variable — `INPUT.JPEG_PROB 0.5`, quality uniform in
+`[20, 90]` (`datasets/jpeg_aug.py`, applied after the photometric
+transforms since real pipelines compress after capture):
+
+| Arm | Config | Warm start |
+| --- | --- | --- |
+| B | `vit_base_8gb_ain_aug2_cam_jpeg.yml` | 93.36 |
+| S | `vit_small_8gb_distill_ain_aug2_jpeg.yml` | 92.68 |
+| P | `osnet_p_8gb_distill_ain_aug2_jpeg.yml` | 87.81 |
+| N | `osnet_n_8gb_distill_ain_aug2_jpeg.yml` | 88.44 |
+| T | `osnet_t_8gb_distill_ain_aug2_jpeg.yml` | 88.61 |
+
+The CNN arms keep their aug2 recipe and old teacher (B-ain-aug) — the
+lineage decision stands; JPEG is the only delta everywhere. Adoption
+gates: jpeg-q20 drop clearly reduced, clean within -0.1, the other 8
+probe conditions non-regressed, official splits agreeing.
 
 ## Measurement checklist per arm
 

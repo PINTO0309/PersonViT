@@ -121,6 +121,11 @@ _C.INPUT.NPO_PATCH_DIR = 'npo_patches'
 # domains (the sample tuple's view/domain slot) that NPO must NOT paste on —
 # already-occluded source domains suffer double occlusion otherwise
 _C.INPUT.NPO_EXCLUDE_DOMAINS = []
+# JPEG-compression augmentation: probability of an in-memory JPEG round-trip
+# at a quality drawn uniformly from JPEG_QUALITY (applied after the
+# photometric transforms — compression happens after capture)
+_C.INPUT.JPEG_PROB = 0.0
+_C.INPUT.JPEG_QUALITY = [20, 90]
 
 # -----------------------------------------------------------------------------
 # Dataset

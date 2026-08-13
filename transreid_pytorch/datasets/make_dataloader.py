@@ -54,6 +54,9 @@ def make_dataloader(cfg):
         photometric.append(T.RandomApply(
             [T.GaussianBlur(5, sigma=tuple(cfg.INPUT.BLUR_SIGMA))],
             p=cfg.INPUT.BLUR_PROB))
+    if cfg.INPUT.JPEG_PROB > 0:
+        from datasets.jpeg_aug import RandomJPEG
+        photometric.append(RandomJPEG(cfg.INPUT.JPEG_PROB, cfg.INPUT.JPEG_QUALITY))
 
     train_transforms = T.Compose([
             T.Resize(cfg.INPUT.SIZE_TRAIN, interpolation=3),

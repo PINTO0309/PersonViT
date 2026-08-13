@@ -1,0 +1,76 @@
+# Unified reid dataset / B-ain-aug2-cam + JPEG-compression augmentation / 8 GB GPU
+# Ablation on the tier's FINAL lineage: warm-starts from the B-ain-aug2-cam best
+# (93.36 mAP) and changes exactly one thing — INPUT.JPEG_PROB 0.5 with
+# quality drawn from [20, 90] (datasets/jpeg_aug.py). Measured exposure
+# being targeted: probe jpeg-q40/q20 drops of B -0.7/-2.4, S -1.0/-3.0,
+# P -1.4/-5.2. Adoption gates: jpeg-q20 drop clearly reduced, clean
+# within -0.1, the other 8 probe conditions non-regressed, official
+# splits agreeing. Teacher/recipe otherwise identical to the lineage.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_vit_base_8gb_ain_aug2_cam/transformer_best_e000040_map0.93355.pth'
+  PRETRAIN_HW_RATIO: 2
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'vit_base_ain_patch16_224_TransReID'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  JPEG_PROB: 0.5
+  JPEG_QUALITY: [20, 90]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 8
+
+CAMPROXY:
+  ENABLED: True
+
+SOLVER:
+  OPTIMIZER_NAME: 'SGD'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.00006
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 32
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  1e-4
+  WEIGHT_DECAY_BIAS: 1e-4
+  BIAS_LR_FACTOR: 2
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'logs/reid_vit_base_8gb_ain_aug2_cam_jpeg'
