@@ -47,7 +47,7 @@ DATALOADER:
   SAMPLER: 'domain_balanced_triplet'
   DOMAIN_ALPHA: 0.5
   NUM_INSTANCE: 4
-  NUM_WORKERS: 8
+  NUM_WORKERS: 16
 
 CAMPROXY:
   ENABLED: True
