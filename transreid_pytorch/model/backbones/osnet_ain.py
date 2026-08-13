@@ -187,11 +187,15 @@ class LiteSelfAttention(nn.Module):
         # has no ONNX opset-17 export
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.reduce = nn.Conv2d(channels, dim, 1, bias=False)
+        # dim == channels removes the bottleneck entirely: attention operates
+        # at native width and the residual update can span every direction
+        self.reduce = (nn.Conv2d(channels, dim, 1, bias=False)
+                       if dim != channels else None)
         self.norm = nn.LayerNorm(dim)
         self.qkv = nn.Linear(dim, dim * 3)
         self.proj = nn.Linear(dim, dim)
-        self.expand = nn.Conv2d(dim, channels, 1, bias=False)
+        self.expand = (nn.Conv2d(dim, channels, 1, bias=False)
+                       if dim != channels else None)
         # small non-zero init: an exactly-zero gate blocks every gradient
         # into the block (bootstrap deadlock; with weight decay the unused
         # weights then decay to zero — observed in the attn_nokd arm). 0.01
@@ -202,7 +206,8 @@ class LiteSelfAttention(nn.Module):
 
     def forward(self, x):
         identity = x
-        x = self.reduce(x)
+        if self.reduce is not None:
+            x = self.reduce(x)
         batch, dim, height, width = x.shape
         tokens = height * width
         x = x.flatten(2).transpose(1, 2)  # B, T, dim
@@ -218,14 +223,16 @@ class LiteSelfAttention(nn.Module):
         x = x.transpose(1, 2).reshape(batch, tokens, dim)
         x = self.proj(x)
         x = x.transpose(1, 2).reshape(batch, dim, height, width)
-        return identity + self.gate * self.expand(x)
+        if self.expand is not None:
+            x = self.expand(x)
+        return identity + self.gate * x
 
 
 class OSNetAIN(nn.Module):
     """OSNet-AIN feature extractor with the TransReID backbone interface."""
 
     def __init__(self, channels=(64, 256, 384, 512), feature_dim=512,
-                 extra_blocks=(0, 0, 0), attn_dim=None):
+                 extra_blocks=(0, 0, 0), attn_dim=None, attn_heads=4):
         super(OSNetAIN, self).__init__()
         self.conv1 = ConvLayer(3, channels[0], 7, stride=2, padding=3, IN=True)
         self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
@@ -259,7 +266,8 @@ class OSNetAIN(nn.Module):
         self.conv5 = Conv1x1(channels[3], channels[3])
         # optional global-relation block between conv5 and GAP (identity at
         # init via its zero gate; new keys only, so checkpoints warm-start)
-        self.attn = LiteSelfAttention(channels[3], attn_dim) if attn_dim else None
+        self.attn = (LiteSelfAttention(channels[3], attn_dim, attn_heads)
+                     if attn_dim else None)
         self.global_avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
             nn.Linear(channels[3], feature_dim),
@@ -352,6 +360,12 @@ def osnet_ain_x1_25_attn(**kwargs):
 
 def osnet_ain_x1_5_attn(**kwargs):
     return OSNetAIN(channels=(96, 384, 576, 768), feature_dim=512, attn_dim=128)
+
+
+def osnet_ain_x1_0_attn_full(**kwargs):
+    # bottleneck-free attention probe: native 512-dim, 8 heads (head_dim 64)
+    return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512,
+                    attn_dim=512, attn_heads=8)
 
 
 def osnet_ain_x1_0_deep(**kwargs):

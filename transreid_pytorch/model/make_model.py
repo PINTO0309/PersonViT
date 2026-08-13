@@ -6,7 +6,8 @@ from .backbones.vit_pytorch import vit_base_patch16_224_TransReID, vit_small_pat
 from .backbones.osnet import osnet_x1_0, osnet_x0_75, osnet_x0_5, osnet_x1_25, osnet_x1_5
 from .backbones.osnet_ain import osnet_ain_x1_0, osnet_ain_x0_75, osnet_ain_x0_5, osnet_ain_x1_25, osnet_ain_x1_5, \
     osnet_ain_x1_0_deep, osnet_ain_x1_25_deep, osnet_ain_x1_5_deep, \
-    osnet_ain_x1_0_attn, osnet_ain_x1_25_attn, osnet_ain_x1_5_attn
+    osnet_ain_x1_0_attn, osnet_ain_x1_25_attn, osnet_ain_x1_5_attn, \
+    osnet_ain_x1_0_attn_full
 from .backbones.swin_transformer import swin_base_patch4_window7_224, swin_small_patch4_window7_224
 from loss.metric_learning import Arcface, Cosface, AMSoftmax, CircleLoss
 from .backbones.resnet_ibn_a import resnet50_ibn_a,resnet101_ibn_a
@@ -475,6 +476,7 @@ __factory_T_type = {
     'osnet_ain_x1_0_attn': osnet_ain_x1_0_attn,
     'osnet_ain_x1_25_attn': osnet_ain_x1_25_attn,
     'osnet_ain_x1_5_attn': osnet_ain_x1_5_attn,
+    'osnet_ain_x1_0_attn_full': osnet_ain_x1_0_attn_full,
     'deit_small_patch16_224_TransReID': vit_small_patch16_224_TransReID,
     'swin_base_patch4_window7_224': swin_base_patch4_window7_224,
     'swin_small_patch4_window7_224': swin_small_patch4_window7_224,
