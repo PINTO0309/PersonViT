@@ -232,17 +232,23 @@ class OSNetAIN(nn.Module):
     """OSNet-AIN feature extractor with the TransReID backbone interface."""
 
     def __init__(self, channels=(64, 256, 384, 512), feature_dim=512,
-                 extra_blocks=(0, 0, 0), attn_dim=None, attn_heads=4):
+                 extra_blocks=(0, 0, 0), attn_dim=None, attn_heads=4,
+                 stem_in_only=False):
         super(OSNetAIN, self).__init__()
         self.conv1 = ConvLayer(3, channels[0], 7, stride=2, padding=3, IN=True)
         self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
         # searched arrangement of osnet_ain_x1_0; extra_blocks appends plain
         # OSBlocks at the end of each stage (existing parameter names stay
         # unchanged, and the searched IN placement is not disturbed) —
-        # identity-initialize the appended blocks via tools/init_depth_expand.py
+        # identity-initialize the appended blocks via tools/init_depth_expand.py.
+        # stem_in_only=True keeps ONLY the conv1 stem IN and replaces every
+        # OSBlockINin with a plain (BN) OSBlock — the IN-information-loss
+        # hypothesis probe: spatial IN discards instance statistics 5x, which
+        # may be what makes the L_cam teacher geometry unrepresentable.
+        inin = OSBlock if stem_in_only else OSBlockINin
         self.conv2 = nn.Sequential(
-            OSBlockINin(channels[0], channels[1]),
-            OSBlockINin(channels[1], channels[1]),
+            inin(channels[0], channels[1]),
+            inin(channels[1], channels[1]),
             *[OSBlock(channels[1], channels[1]) for _ in range(extra_blocks[0])],
         )
         self.pool2 = nn.Sequential(
@@ -251,7 +257,7 @@ class OSNetAIN(nn.Module):
         )
         self.conv3 = nn.Sequential(
             OSBlock(channels[1], channels[2]),
-            OSBlockINin(channels[2], channels[2]),
+            inin(channels[2], channels[2]),
             *[OSBlock(channels[2], channels[2]) for _ in range(extra_blocks[1])],
         )
         self.pool3 = nn.Sequential(
@@ -259,7 +265,7 @@ class OSNetAIN(nn.Module):
             nn.AvgPool2d(2, stride=2),
         )
         self.conv4 = nn.Sequential(
-            OSBlockINin(channels[2], channels[3]),
+            inin(channels[2], channels[3]),
             OSBlock(channels[3], channels[3]),
             *[OSBlock(channels[3], channels[3]) for _ in range(extra_blocks[2])],
         )
@@ -360,6 +366,13 @@ def osnet_ain_x1_25_attn(**kwargs):
 
 def osnet_ain_x1_5_attn(**kwargs):
     return OSNetAIN(channels=(96, 384, 576, 768), feature_dim=512, attn_dim=128)
+
+
+def osnet_ain_stem_x1_0_attn(**kwargs):
+    # IN-information-loss probe: stem IN only (1 InstanceNorm instead of 5),
+    # plain BN OSBlocks elsewhere, plus the bottlenecked attention block
+    return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512,
+                    attn_dim=128, stem_in_only=True)
 
 
 def osnet_ain_x1_0_attn_full(**kwargs):
