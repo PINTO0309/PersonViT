@@ -526,6 +526,20 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 
 - official dataset style-shift eval - query only shifted
 
+  | condition | mAP | R1 | dmAP | dR1 |
+  | --- | ---: | ---: | ---: | ---: |
+  | clean | 0.8929 | 0.9514 | — | — |
+  | bright+30% | 0.8883 | 0.9487 | -0.0046 | -0.0026 |
+  | dark-30% | 0.8915 | 0.9497 | -0.0014 | -0.0016 |
+  | contrast-40% | 0.8929 | 0.9513 | -0.0000 | -0.0001 |
+  | contrast+40% | 0.7974 | 0.8635 | -0.0955 | -0.0879 |
+  | warm | 0.7918 | 0.8670 | -0.1011 | -0.0843 |
+  | cool | 0.8176 | 0.8930 | -0.0753 | -0.0584 |
+  | gamma0.6 | 0.8720 | 0.9393 | -0.0209 | -0.0121 |
+  | gamma1.6 | 0.8544 | 0.9264 | -0.0384 | -0.0250 |
+  | jpeg-q40 | 0.8831 | 0.9455 | -0.0098 | -0.0059 |
+  | jpeg-q20 | 0.8576 | 0.9248 | -0.0353 | -0.0266 |
+
 #### osnet_ain_ms_d_c - 2.2M
 
 | dataset | queries | gallery | mAP | R1 | R5 | R10 |
