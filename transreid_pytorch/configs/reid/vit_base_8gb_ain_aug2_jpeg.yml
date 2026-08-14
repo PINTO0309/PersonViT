@@ -1,0 +1,76 @@
+# Unified reid dataset / B-ain-aug2 + JPEG-compression augmentation, no L_cam / 8 GB GPU
+# No-camproxy counterpart of vit_base_8gb_ain_aug2_cam_jpeg.yml: same JPEG
+# recipe (INPUT.JPEG_PROB 0.5, quality [20, 90]), CAMPROXY off, and the
+# SAME warm start as the round-2 arms (B-ain-aug best 92.26) — identical
+# init to A0 ctrl (92.31) and A1 cam (93.36). Two paired readings:
+#   vs A0 ctrl 92.31  -> jpeg gain without L_cam (round-count matched);
+#   vs cam_jpeg 93.50 -> L_cam contribution inside the final jpeg recipe
+#     (cam_jpeg has one extra fine-tune round; ctrl measured a plain
+#     round at ~+0.05, so the round-count bias is negligible).
+# If the cam_jpeg gap stays ~+1 the L_cam and jpeg gains are additive; if
+# it shrinks, jpeg regularization overlaps with what L_cam provides.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_vit_base_8gb_ain_aug/transformer_best_e000037_map0.92264.pth'
+  PRETRAIN_HW_RATIO: 2
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'vit_base_ain_patch16_224_TransReID'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  JPEG_PROB: 0.5
+  JPEG_QUALITY: [20, 90]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 16
+
+SOLVER:
+  OPTIMIZER_NAME: 'SGD'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.00006
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 32
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  1e-4
+  WEIGHT_DECAY_BIAS: 1e-4
+  BIAS_LR_FACTOR: 2
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'logs/reid_vit_base_8gb_ain_aug2_jpeg'
