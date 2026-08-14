@@ -554,6 +554,20 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 
 - official dataset style-shift eval - query only shifted
 
+  | condition | mAP | R1 | dmAP | dR1 |
+  | --- | ---: | ---: | ---: | ---: |
+  | clean | 0.5001 | 0.7310 | — | — |
+  | bright+30% | 0.4945 | 0.7236 | -0.0055 | -0.0074 |
+  | dark-30% | 0.4992 | 0.7307 | -0.0009 | -0.0003 |
+  | contrast-40% | 0.4903 | 0.7220 | -0.0097 | -0.0090 |
+  | contrast+40% | 0.4101 | 0.6127 | -0.0900 | -0.1183 |
+  | warm | 0.4159 | 0.6370 | -0.0841 | -0.0940 |
+  | cool | 0.4340 | 0.6668 | -0.0661 | -0.0642 |
+  | gamma0.6 | 0.4791 | 0.7068 | -0.0210 | -0.0242 |
+  | gamma1.6 | 0.4492 | 0.6788 | -0.0508 | -0.0521 |
+  | jpeg-q40 | 0.4819 | 0.7087 | -0.0182 | -0.0223 |
+  | jpeg-q20 | 0.4379 | 0.6571 | -0.0621 | -0.0738 |
+
 #### `-ain` variants vs the standard ladder
 
 Every tier exists (or is planned) in two flavors that share the same training recipe, data and evaluation protocol; the only difference is where the network normalizes:
