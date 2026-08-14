@@ -542,13 +542,17 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 
 #### osnet_ain_ms_d_c - 2.2M
 
-| dataset | queries | gallery | mAP | R1 | R5 | R10 |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| market | 3,368 | 15,913 | 0.4580 | 0.7304 | 0.8655 | 0.9047 |
-| msmt17 | 11,659 | 82,161 | 0.4869 | 0.7613 | 0.8662 | 0.8965 |
-| duke_occ | 2,210 | 17,661 | 0.4757 | 0.6167 | 0.7670 | 0.8163 |
-| cuhk03np | 1,400 | 5,332 | 0.5776 | 0.6079 | 0.7779 | 0.8543 |
-| occ_reid | 1,000 | 1,000 | 0.7407 | 0.8040 | 0.8970 | 0.9320 |
+- official dataset eval
+
+  | dataset | queries | gallery | mAP | R1 | R5 | R10 |
+  | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+  | market | 3,368 | 15,913 | 0.4580 | 0.7304 | 0.8655 | 0.9047 |
+  | msmt17 | 11,659 | 82,161 | 0.4869 | 0.7613 | 0.8662 | 0.8965 |
+  | duke_occ | 2,210 | 17,661 | 0.4757 | 0.6167 | 0.7670 | 0.8163 |
+  | cuhk03np | 1,400 | 5,332 | 0.5776 | 0.6079 | 0.7779 | 0.8543 |
+  | occ_reid | 1,000 | 1,000 | 0.7407 | 0.8040 | 0.8970 | 0.9320 |
+
+- official dataset style-shift eval - query only shifted
 
 #### `-ain` variants vs the standard ladder
 
