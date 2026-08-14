@@ -228,15 +228,56 @@ class LiteSelfAttention(nn.Module):
         return identity + self.gate * x
 
 
+class SeparableSelfAttention(nn.Module):
+    """O(N) separable self-attention (MobileViTv2-style) for early feature maps.
+
+    Entrance placement puts attention where the token count is 16x the tail
+    (64x32 = 2048 tokens after the stem vs 16x8 = 128 after conv5), so the
+    quadratic LiteSelfAttention is unaffordable there (+55% of the whole P
+    tier). This variant replaces the T x T attention matrix with a single
+    softmax-weighted context vector: scores = softmax over tokens of a 1-ch
+    projection, context = score-weighted sum of keys (one d-vector), output
+    = proj(relu(values) * context). Cost is O(T*d) — ~25M MACs (+2.6% of P)
+    at the stem — and the graph is NCHW-native: no attention matrix, no head
+    split, no transposes; only two flatten-to-rank-3 reshapes for the token
+    softmax/sum.
+    """
+
+    def __init__(self, channels):
+        super(SeparableSelfAttention, self).__init__()
+        self.score = nn.Conv2d(channels, 1, 1)
+        self.key = nn.Conv2d(channels, channels, 1)
+        self.value = nn.Conv2d(channels, channels, 1)
+        self.proj = nn.Conv2d(channels, channels, 1)
+        # same bootstrap contract as LiteSelfAttention: small non-zero init
+        # (exactly-zero blocks every gradient into the block) and weight
+        # decay disabled in solver/make_optimizer.py
+        self.gate = nn.Parameter(torch.full((1,), 0.01))
+
+    def forward(self, x):
+        batch, channels, height, width = x.shape
+        scores = self.score(x).flatten(2).softmax(dim=-1)       # B, 1, T
+        context = (self.key(x).flatten(2) * scores).sum(dim=-1)  # B, C
+        context = context.reshape(batch, channels, 1, 1)
+        out = self.proj(torch.relu(self.value(x)) * context)
+        return x + self.gate * out
+
+
 class OSNetAIN(nn.Module):
     """OSNet-AIN feature extractor with the TransReID backbone interface."""
 
     def __init__(self, channels=(64, 256, 384, 512), feature_dim=512,
                  extra_blocks=(0, 0, 0), attn_dim=None, attn_heads=4,
-                 stem_in_only=False):
+                 stem_in_only=False, sep_stem_attn=False):
         super(OSNetAIN, self).__init__()
         self.conv1 = ConvLayer(3, channels[0], 7, stride=2, padding=3, IN=True)
         self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
+        # optional entrance attention right after the stem (post-IN/maxpool):
+        # every later conv then processes globally-contextualized features.
+        # Separable (O(N)) because 2048 tokens make quadratic attention
+        # unaffordable here. New keys only -> checkpoints warm-start.
+        self.stem_attn = (SeparableSelfAttention(channels[0])
+                          if sep_stem_attn else None)
         # searched arrangement of osnet_ain_x1_0; extra_blocks appends plain
         # OSBlocks at the end of each stage (existing parameter names stay
         # unchanged, and the searched IN placement is not disturbed) —
@@ -304,6 +345,8 @@ class OSNetAIN(nn.Module):
     def forward(self, x, cam_label=None, view_label=None):
         x = self.conv1(x)
         x = self.maxpool(x)
+        if self.stem_attn is not None:
+            x = self.stem_attn(x)
         x = self.conv2(x)
         x = self.pool2(x)
         x = self.conv3(x)
@@ -373,6 +416,25 @@ def osnet_ain_stem_x1_0_attn(**kwargs):
     # plain BN OSBlocks elsewhere, plus the bottlenecked attention block
     return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512,
                     attn_dim=128, stem_in_only=True)
+
+
+def osnet_ain_x1_0_sepattn(**kwargs):
+    # entrance-attention probe on the standard (5-IN) architecture: one O(N)
+    # separable attention block right after the stem, plus the gated tail
+    # LiteSelfAttention (kept by decision: both gates read out independently)
+    return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512,
+                    sep_stem_attn=True, attn_dim=128)
+
+
+def osnet_ain_stem_x1_0_sepattn(**kwargs):
+    # entrance-attention probe on the stem-IN-only lineage: 1 InstanceNorm
+    # (conv1 stem), plain BN OSBlocks elsewhere, one O(N) separable attention
+    # block right after the stem, plus the gated tail LiteSelfAttention.
+    # The tail block self-suppressed in all three prior environments but is
+    # kept by decision — entrance context may change what the tail sees, and
+    # its gate doubles as a free readout of that interaction.
+    return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512,
+                    stem_in_only=True, sep_stem_attn=True, attn_dim=128)
 
 
 def osnet_ain_x1_0_attn_full(**kwargs):

@@ -431,6 +431,54 @@ hardening — the jpeg-q20 exposure roughly halves on every tier at zero
 cost elsewhere, with P (the most exposed tier) also gaining +0.34 clean.
 All five README rows and ONNX artifacts now carry the jpeg lineage.
 
+## IN-information-loss probe (stem-IN-only arm, running)
+
+Live hypothesis after Phase 3: the OSNet-AIN students' 0.77 relational-KD
+floor against the L_cam teacher is caused by the five spatial InstanceNorms
+discarding the instance-specific statistics the L_cam geometry is built on
+(evidence: IN clean cost is CNN −3.0/−2.7 vs ViT −1.2/−0.8; AIN→AIN
+distillation converges fine at 0.39–0.41; the failure is specific to the
+L_cam teacher). Probe: `osnet_ain_stem_x1_0_attn` — only the conv1 stem IN
+survives (1 IN instead of 5, OSBlockINin → plain BN OSBlock), distilled
+from B-ain-aug2-cam-jpeg, warm start P jpeg best 88.15, 140 epochs
+(`osnet_p_8gb_distill_ain_stem_attn.yml`). PRIMARY metric: terminal
+relational-KD loss (→~0.5 confirms IN as the bottleneck; ~0.77 exonerates).
+
+Interim at e31: mAP crashed to 20.0 at e1 (4 blocks partially re-init)
+and recovered to 82.4; Distill 1.08 and still descending with LR high
+(8.8e-5) — the floor verdict waits for the cosine tail. The attention
+gate self-suppressed AGAIN (0.043 at e7 → 0.0062 at e31): third
+environment (IN×5 distilled, IN×5 no-teacher, IN×1 distilled) with the
+same signature, so the tail-attention closure is environment-independent
+— "IN discarded the information attention needed" is refuted as a
+coupling; the IN hypothesis itself remains open pending the terminal
+Distill value.
+
+### Entrance separable-attention design (prepared, not started)
+
+Counter-design to the closed tail-attention line: attention placed where
+convs can still *use* global context (right after the stem) instead of
+after aggregation. Quadratic attention is unaffordable there (2048 tokens,
++55% MACs), so the block is an O(N) separable self-attention
+(MobileViTv2-style: 1-ch softmax context scores → one score-weighted key
+context vector → `proj(relu(V)·context)`, gated residual, gate init 0.01
+with the `.stem_attn.` weight-decay exemption). Cost: +12.5k params
+(+0.58%), +25M MACs (+2.6% of P). ONNX graph is NCHW-native: no attention
+matrix / head split / transposes; the entrance block's ops delta =
+Softmax(axis −1) ×1, ReduceSum ×1, Reshape ×3 (`[1,1,−1]`, `[1,64,−1]`,
+`[1,64,1,1]`) — the export contract needs these classes (plus
+`attn_qkv_unflatten` from the stem e007 export) added before formal
+adoption. The gated tail LiteSelfAttention (128-dim) is KEPT by decision
+despite its three self-suppressions: entrance context may change what the
+tail sees, and its gate is a free readout of that interaction. Factories:
+`osnet_ain_x1_0_sepattn` (standard 5-IN) and `osnet_ain_stem_x1_0_sepattn`
+(stem-IN-only), both = entrance separable + tail LiteSelfAttention; config
+`osnet_p_8gb_distill_ain_stem_sepattn.yml` mirrors the stem_attn recipe.
+Sequencing: start after the stem_attn verdict so the IN-reduction and
+entrance-attention variables stay separable; primary readout is the two
+gate trajectories (`base.stem_attn.gate` entrance / `base.attn.gate` tail)
+vs the thrice-observed tail self-suppression signature.
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
