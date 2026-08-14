@@ -13,3 +13,4 @@ transreid_pytorch/npo_patches/
 _pyproject.toml
 .venv/
 *.pdf
+*.tar.gz

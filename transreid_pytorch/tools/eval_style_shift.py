@@ -52,17 +52,21 @@ def build_transforms(condition_fn):
     ])
 
 
-def extract(model, samples, transforms, device='cuda', desc='features'):
-    loader = DataLoader(
+def _make_loader(samples, transforms):
+    return DataLoader(
         ImageDataset(samples, transforms),
         batch_size=cfg.TEST.IMS_PER_BATCH, shuffle=False,
         num_workers=4, collate_fn=val_collate_fn,
     )
+
+
+def extract(model, samples, transforms, device='cuda', desc='features'):
     feats = []
     model.eval()
     with torch.no_grad():
         for img, pid, camid, camids, target_view, _ in tqdm(
-                loader, desc=desc, dynamic_ncols=True, leave=False):
+                _make_loader(samples, transforms), desc=desc,
+                dynamic_ncols=True, leave=False):
             feat = model(img.to(device), cam_label=camids.to(device),
                          view_label=target_view.to(device))
             feats.append(feat.detach().cpu())
@@ -72,10 +76,35 @@ def extract(model, samples, transforms, device='cuda', desc='features'):
     return feats
 
 
+def extract_onnx(session, samples, transforms, desc='features'):
+    """ONNX Runtime feature extraction (I/O tensor names auto-detected, so
+    third-party graphs such as the upstream torchreid OSNet-AIN work)."""
+    input_meta = session.get_inputs()[0]
+    output_name = session.get_outputs()[0].name
+    fixed_batch = isinstance(input_meta.shape[0], int)
+    feats = []
+    for img, *_ in tqdm(_make_loader(samples, transforms), desc=desc,
+                        dynamic_ncols=True, leave=False):
+        batch = img.numpy()
+        if fixed_batch and input_meta.shape[0] == 1:
+            outputs = [session.run([output_name], {input_meta.name: row[None]})[0]
+                       for row in batch]
+            feats.append(np.concatenate(outputs, axis=0))
+        else:
+            feats.append(session.run([output_name], {input_meta.name: batch})[0])
+    feats = torch.from_numpy(np.concatenate(feats, axis=0))
+    if cfg.TEST.FEAT_NORM == 'yes':
+        feats = torch.nn.functional.normalize(feats, dim=1, p=2)
+    return feats
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument('--config', required=True)
-    ap.add_argument('--weight', required=True, help='trained checkpoint (glob allowed)')
+    ap.add_argument('--weight', help='trained checkpoint (glob allowed)')
+    ap.add_argument('--onnx', help='evaluate an ONNX model instead of a checkpoint '
+                                   '(I/O names auto-detected; third-party graphs work — '
+                                   'override normalization via trailing opts)')
     ap.add_argument('--mode', choices=('query', 'all'), default='query',
                     help="'query': shift queries only (default); 'all': shift both sides")
     ap.add_argument('--dataset', choices=('reid', 'official'), default='reid',
@@ -95,10 +124,15 @@ def main():
         args.opts = [token for token in args.opts if token != '--markdown']
         args.markdown = True
 
-    weight = sorted(glob.glob(args.weight))
-    if not weight:
-        raise FileNotFoundError('no checkpoint matches {}'.format(args.weight))
-    weight = weight[-1]
+    if bool(args.weight) == bool(args.onnx):
+        ap.error('exactly one of --weight / --onnx is required')
+    if args.onnx:
+        target = args.onnx
+    else:
+        weight = sorted(glob.glob(args.weight))
+        if not weight:
+            raise FileNotFoundError('no checkpoint matches {}'.format(args.weight))
+        target = weight[-1]
 
     cfg.merge_from_file(args.config)
     cfg.merge_from_list(['MODEL.PRETRAIN_CHOICE', 'none'])
@@ -106,8 +140,8 @@ def main():
         cfg.merge_from_list(args.opts)
     cfg.freeze()
 
-    cache = EvalCache(weight, enabled=not args.recompute)
-    key = {'tool': 'eval_style_shift', 'checkpoint': checkpoint_signature(weight),
+    cache = EvalCache(target, enabled=not args.recompute)
+    key = {'tool': 'eval_style_shift', 'checkpoint': checkpoint_signature(target),
            'config': os.path.basename(args.config), 'mode': args.mode,
            'opts': args.opts}
     if args.dataset != 'reid':  # keep pre-existing unified-split cache keys valid
@@ -118,9 +152,19 @@ def main():
     from_cache = rows is not None
 
     if rows is None:
-        model = make_model(cfg, num_class=751, camera_num=0, view_num=0)
-        model.load_param(weight)
-        model.to('cuda')
+        if args.onnx:
+            from tools.eval_official_onnx import build_session
+            session = build_session(target)
+
+            def run_extract(samples, transforms, desc):
+                return extract_onnx(session, samples, transforms, desc=desc)
+        else:
+            model = make_model(cfg, num_class=751, camera_num=0, view_num=0)
+            model.load_param(target)
+            model.to('cuda')
+
+            def run_extract(samples, transforms, desc):
+                return extract(model, samples, transforms, desc=desc)
 
         if args.dataset == 'reid':
             datasets = [('reid', REID(root=cfg.DATASETS.ROOT_DIR, verbose=False))]
@@ -137,16 +181,16 @@ def main():
             g_pids = np.array([s[1] for s in dataset.gallery])
             g_camids = np.array([s[2] for s in dataset.gallery])
 
-            clean_gallery = extract(model, dataset.gallery, build_transforms(None),
-                                    desc='{} gallery (clean)'.format(ds_name))
+            clean_gallery = run_extract(dataset.gallery, build_transforms(None),
+                                        '{} gallery (clean)'.format(ds_name))
 
             for name, fn in CONDITIONS.items():
                 transforms = build_transforms(fn)
-                qf = extract(model, dataset.query, transforms,
-                             desc='{} queries ({})'.format(ds_name, name))
+                qf = run_extract(dataset.query, transforms,
+                                 '{} queries ({})'.format(ds_name, name))
                 gf = (clean_gallery if args.mode == 'query' or fn is None
-                      else extract(model, dataset.gallery, transforms,
-                                   desc='{} gallery ({})'.format(ds_name, name)))
+                      else run_extract(dataset.gallery, transforms,
+                                       '{} gallery ({})'.format(ds_name, name)))
                 cmc, mAP = eval_func(euclidean_distance(qf, gf),
                                      q_pids, g_pids, q_camids, g_camids)[:2]
                 totals[name][0] += float(mAP) * len(q_pids)
@@ -161,7 +205,7 @@ def main():
                   log_lines=['dataset: {} / mode: {} shifted'.format(args.dataset, args.mode)]
                   + _render(rows, markdown=False))
 
-    print('\nmodel  : {}'.format(weight))
+    print('\nmodel  : {}'.format(target))
     print('dataset: {}'.format('unified reid test split' if args.dataset == 'reid'
                                else 'official splits (query-weighted aggregate)'))
     print('mode   : {} shifted'.format('query only' if args.mode == 'query' else 'query+gallery'))
