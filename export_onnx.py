@@ -211,9 +211,9 @@ AIN_AUG_MODELS = (
         key="p-ain-aug",
         dataset="unified",
         architecture="OSNet-AIN x1.0",
-        config="transreid_pytorch/configs/reid/osnet_p_8gb_distill_ain_aug2.yml",
+        config="transreid_pytorch/configs/reid/osnet_p_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_aug2/"
+            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_aug2_jpeg/"
             "transformer_best_*.pth"
         ),
         output="osnet_ain_x1_0_p_unified_aug.onnx",
@@ -226,9 +226,9 @@ AIN_AUG_MODELS = (
         key="n-ain-aug",
         dataset="unified",
         architecture="OSNet-AIN x1.25",
-        config="transreid_pytorch/configs/reid/osnet_n_8gb_distill_ain_aug2.yml",
+        config="transreid_pytorch/configs/reid/osnet_n_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_n_8gb_distill_ain_aug2/"
+            "transreid_pytorch/logs/reid_osnet_n_8gb_distill_ain_aug2_jpeg/"
             "transformer_best_*.pth"
         ),
         output="osnet_ain_x1_25_n_unified_aug.onnx",
@@ -241,9 +241,9 @@ AIN_AUG_MODELS = (
         key="t-ain-aug",
         dataset="unified",
         architecture="OSNet-AIN x1.5",
-        config="transreid_pytorch/configs/reid/osnet_t_8gb_distill_ain_aug2.yml",
+        config="transreid_pytorch/configs/reid/osnet_t_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_t_8gb_distill_ain_aug2/"
+            "transreid_pytorch/logs/reid_osnet_t_8gb_distill_ain_aug2_jpeg/"
             "transformer_best_*.pth"
         ),
         output="osnet_ain_x1_5_t_unified_aug.onnx",

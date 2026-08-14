@@ -415,7 +415,21 @@ photometric conditions improved or held (warm -4.45 -> -3.82, mean-8
 (msmt17 +0.92, duke_occ +0.78, market +0.25, cuhk03np +0.11). New S
 flagship:
 `logs/reid_vit_small_8gb_distill_ain_aug2_jpeg/transformer_best_e000037_map0.92954.pth`.
-CNN jpeg arms (P/N/T, unchanged aug2 recipe/teacher) still pending.
+
+**CNN arms — all three ADOPTED. JPEG ablation final: 5/5.** Against
+their aug2 baselines:
+
+| Tier | clean | jpeg-q20 | mean-8 | officials |
+| --- | --- | --- | --- | --- |
+| P | 87.81 -> **88.15** (+0.34) | -5.17 -> **-2.61** | 3.52 -> 3.43 | 4 up, occ_reid -0.13 at ceiling |
+| N | 88.44 -> 88.44 (flat) | -4.75 -> **-2.59** | 3.82 -> 3.71 | flat within +-0.2 |
+| T | 88.61 -> **88.69** (+0.08) | -4.73 -> **-2.49** | 3.89 -> 3.93 (within tol.) | flat within +-0.2 |
+
+Reading: on the ViT tiers JPEG augmentation acted as a general
+regularizer (clean +0.15/+0.27); on the CNNs it is a pure compression
+hardening — the jpeg-q20 exposure roughly halves on every tier at zero
+cost elsewhere, with P (the most exposed tier) also gaining +0.34 clean.
+All five README rows and ONNX artifacts now carry the jpeg lineage.
 
 ## Measurement checklist per arm
 
