@@ -271,13 +271,33 @@ export OPENAI_API_KEY=...       # never written to state or manifests
 python tools/generate_synth_reid33.py pilot --resume
 # Rerun after each asynchronous Batch stage completes.
 python tools/generate_synth_reid33.py pilot --resume
+python tools/generate_synth_reid33.py repair-pilot --dry-run
+python tools/generate_synth_reid33.py repair-pilot
 python tools/generate_synth_reid33.py qa
 python tools/generate_synth_reid33.py report
 ```
 
-Before `qa`, place the real-data cross-camera positive 5-percentile calibration
-for both ONNX models in
-`data/SyntheticReID33/qa/real_similarity_reference.json`, for example:
+`repair-pilot` reprocesses every successful raw candidate with the official
+TorchVision SSDLite person detector and Keypoint R-CNN pose model, then chooses
+one accepted candidate for each of the 192 pilot specifications. This avoids
+paying for retries caused by OpenCV HOG false positives. The first invocation
+downloads and caches the official model weights. The command refuses to change
+the pilot manifest while a Batch is active or completed but not yet collected;
+run `pilot --resume` once more in that case. `--dry-run` verifies complete
+recoverability without changing final images, manifests, jobs, or attempts.
+
+Before `qa`, measure the real-data cross-camera positive 5-percentile
+calibration for both ONNX models. The command uses every same-PID,
+different-camera pair from the unified `query` and `gallery` protocol while
+excluding gallery-only distractor PIDs:
+
+```shell
+python tools/calibrate_synth_reid33_similarity.py
+```
+
+It writes `data/SyntheticReID33/qa/real_similarity_reference.json` with the
+measured thresholds, per-domain distributions, model hashes, dataset index
+hash, preprocessing contract, and pair counts. Its minimum interface is:
 
 ```json
 {

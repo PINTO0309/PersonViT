@@ -16,6 +16,11 @@ TOOLS = REPO / "transreid_pytorch" / "tools"
 sys.path.insert(0, str(TOOLS))
 
 from build_unified_dataset import validate_explicit_domain, validate_unified_output  # noqa: E402
+from calibrate_synth_reid33_similarity import (  # noqa: E402
+    collect_protocol_records,
+    cross_camera_positive_values,
+    distribution_summary,
+)
 from generate_synth_reid33 import (  # noqa: E402
     PipelineError,
     _batch_failure_summaries,
@@ -23,7 +28,10 @@ from generate_synth_reid33 import (  # noqa: E402
     _paths,
     _refresh_and_collect,
     _prepare_retries,
+    _repair_candidate_rank,
     enforce_cost_ceiling,
+    initialize,
+    repair_pilot,
 )
 from evaluate_synth_reid33_adoption import evaluate_adoption  # noqa: E402
 from synth_reid33_core import (  # noqa: E402
@@ -37,6 +45,10 @@ from synth_reid33_core import (  # noqa: E402
     make_identities,
     make_pilot_samples,
     make_samples,
+    _crop_pad_person,
+    _nms_person_candidates,
+    process_image,
+    read_jsonl,
     reconcile_batch_output,
     sha256_file,
     validate_pilot,
@@ -106,6 +118,167 @@ def test_duplicate_batch_result_is_rejected():
 )
 def test_generation_failures_are_classified(item, classification):
     assert classify_batch_item(item) == classification
+
+
+def test_person_nms_suppresses_nested_duplicate_but_keeps_independent_person():
+    boxes = [
+        [10, 10, 110, 210],
+        [20, 30, 100, 200],
+        [300, 20, 390, 210],
+    ]
+    scores = [0.99, 0.85, 0.90]
+    assert _nms_person_candidates(boxes, scores) == [0, 2]
+
+
+def test_person_crop_expands_real_context_instead_of_reflecting_subject():
+    import numpy as np
+
+    image = np.zeros((100, 100, 3), dtype=np.uint8)
+    image[20:80, 45:55] = (0, 0, 255)
+    crop = _crop_pad_person(image, (45, 20, 10, 60), margin=0.1)
+
+    assert crop.shape == (256, 128, 3)
+    assert not crop[:, :8, 2].any()
+    assert not crop[:, -8:, 2].any()
+    assert crop[:, 48:80, 2].any()
+
+
+def test_real_similarity_calibration_excludes_gallery_only_distractor(tmp_path):
+    import numpy as np
+
+    query = tmp_path / "query"
+    gallery = tmp_path / "gallery"
+    query.mkdir()
+    gallery.mkdir()
+    for directory, name in (
+        (query, "p00001_d00_c000_000001.jpg"),
+        (gallery, "p00001_d00_c001_000002.jpg"),
+        (gallery, "p00001_d00_c001_000003.jpg"),
+        (gallery, "p00099_d00_c000_000004.jpg"),
+        (gallery, "p00099_d00_c001_000005.jpg"),
+    ):
+        _save_image(directory / name, (1, 2, 3))
+    records, metadata = collect_protocol_records(tmp_path)
+    features = np.asarray([[1.0, 0.0], [0.8, 0.6], [0.6, 0.8]], dtype=np.float32)
+    values, by_domain = cross_camera_positive_values(features, records)
+
+    assert metadata["query_identities"] == 1
+    assert metadata["excluded_gallery_only_identities"] == 1
+    assert len(records) == 3
+    assert sorted(values.tolist()) == pytest.approx([0.6, 0.8])
+    assert distribution_summary(values)["pair_count"] == 2
+    assert set(by_domain) == {"d00"}
+
+
+def test_repair_candidate_rank_prefers_geometry_then_visibility():
+    failed = {"accepted": False, "pose_geometry": {"region_scores": {"head": 20}},
+              "person_detection": {"principal_score": 0.999}}
+    accepted_low = {"accepted": True, "pose_geometry": {"region_scores": {"head": 2}},
+                    "person_detection": {"principal_score": 0.99}}
+    accepted_high = {"accepted": True, "pose_geometry": {"region_scores": {"head": 5}},
+                     "person_detection": {"principal_score": 0.95}}
+    assert _repair_candidate_rank({"quality": "medium", "attempt": 1}, failed) < _repair_candidate_rank(
+        {"quality": "low", "attempt": 1}, accepted_low
+    )
+    assert _repair_candidate_rank({"quality": "low", "attempt": 1}, accepted_low) < _repair_candidate_rank(
+        {"quality": "medium", "attempt": 2}, accepted_high
+    )
+
+
+def test_process_image_uses_principal_detector_and_keypoint_geometry(
+    tmp_path, config, monkeypatch
+):
+    import synth_reid33_core as core
+
+    raw = tmp_path / "raw.jpg"
+    Image.new("RGB", (576, 1152), (120, 130, 140)).save(raw)
+    final = tmp_path / "final.jpg"
+    monkeypatch.setattr(core, "_person_detection", lambda _image: {
+        "bbox": (180, 150, 220, 850), "count": 1, "candidate_count_before_nms": 2,
+        "principal_score": 0.99, "backend": "test", "weights": "test",
+        "score_threshold": 0.35, "nms_iou_threshold": 0.35,
+    })
+    monkeypatch.setattr(core, "_pose_geometry", lambda _image, _occluded, _bbox: {
+        "available": True, "backend": "test", "pass": True,
+        "regions": {"head": True, "shoulders": True, "feet": True},
+        "region_scores": {"head": 5.0, "shoulders": 5.0, "feet": 5.0},
+        "reason": None,
+    })
+    camera = make_cameras(config)[0]
+    sample = {"occluded": False, "generation_seed": 123}
+    qa = process_image(raw, final, camera, sample, config)
+    assert qa["accepted"]
+    assert qa["principal_person_detected"]
+    assert qa["person_detection_count"] == 1
+    assert qa["final_size"] == [128, 256]
+    assert Image.open(final).size == (128, 256)
+
+
+def test_repair_pilot_atomically_rebuilds_complete_manifest(tmp_path, config, monkeypatch):
+    import generate_synth_reid33 as generator
+
+    paths = initialize(tmp_path, config)
+    samples = read_jsonl(paths["pilot_samples"])
+    assets = [
+        {"asset_id": f"asset-{index}", "sha256": f"sha-{index}", "file_id": f"file-{index}"}
+        for index in range(81)
+    ]
+    jobs = []
+    attempts = []
+    raw_dir = tmp_path / "raw" / "pilot"
+    raw_dir.mkdir(parents=True)
+    for index, sample in enumerate(samples):
+        custom_id = f"repair-{index:03d}-a1"
+        jobs.append({
+            "custom_id": custom_id,
+            "scope": "pilot",
+            "kind": "sample",
+            "sample_id": sample["sample_id"],
+            "status": "qa_failed",
+            "attempt": 1,
+            "quality": sample["quality"],
+            "logical_refs": ["asset-0"],
+            "body": {"prompt": f"prompt {index}"},
+        })
+        attempts.append({
+            "custom_id": custom_id,
+            "classification": "succeeded",
+            "response_model": "gpt-image-2",
+            "request_id": f"request-{index}",
+            "batch_id": "batch-complete",
+            "usage": {},
+            "estimated_cost_usd": 0.01,
+        })
+        (raw_dir / f"{custom_id}.jpg").write_bytes(f"raw-{index}".encode())
+    atomic_write_jsonl(paths["assets"], assets)
+    atomic_write_jsonl(paths["jobs"], jobs)
+    atomic_write_jsonl(paths["attempts"], attempts)
+    atomic_write_jsonl(paths["batches"], [{
+        "batch_id": "batch-complete", "status": "completed", "collected": True,
+    }])
+
+    def fake_process(raw_path, final_path, _camera, _sample, _config):
+        final_path.write_bytes(raw_path.read_bytes())
+        return {
+            "accepted": True,
+            "processing_version": "test-qa",
+            "person_detection": {"principal_score": 0.99},
+            "pose_geometry": {"region_scores": {"head": 5.0}},
+            "final_sha256": sha256_file(final_path),
+        }
+
+    monkeypatch.setattr(generator, "process_image", fake_process)
+    report = repair_pilot(tmp_path, config)
+    manifest = read_jsonl(paths["pilot_manifest"])
+    repaired_jobs = read_jsonl(paths["jobs"])
+    repaired_attempts = read_jsonl(paths["attempts"])
+
+    assert report["complete"]
+    assert report["selected"] == 192
+    assert len(manifest) == 192
+    assert all(row["status"] == "succeeded" for row in repaired_jobs)
+    assert all(row["selected_by_repair"] for row in repaired_attempts)
+    assert all((tmp_path / row["final_path"]).is_file() for row in manifest)
 
 
 def test_expired_batch_is_resumable_without_duplicate_submission(tmp_path, config):

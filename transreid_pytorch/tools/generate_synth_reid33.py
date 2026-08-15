@@ -17,10 +17,12 @@ from __future__ import annotations
 
 import argparse
 import base64
+import gc
 import json
 import os
 import shutil
 import sys
+import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -32,6 +34,7 @@ from synth_reid33_core import (
     allocate_pilot_cameras,
     anchor_view_prompt,
     approval_payload,
+    atomic_write_bytes,
     atomic_write_json,
     atomic_write_jsonl,
     canonical_json,
@@ -514,8 +517,6 @@ def _refresh_and_collect(
             if job["kind"] in {"anchor", "plate"}:
                 raw = root / "assets" / f"{job['asset_id']}.jpg"
                 raw.parent.mkdir(parents=True, exist_ok=True)
-                from synth_reid33_core import atomic_write_bytes
-
                 atomic_write_bytes(raw, image_bytes)
                 file_id = client.upload(raw, purpose="vision")
                 assets[job["asset_id"]] = {
@@ -537,41 +538,19 @@ def _refresh_and_collect(
                 sample = (pilot_specs if job["scope"] == "pilot" else full_specs)[job["sample_id"]]
                 raw = root / "raw" / job["scope"] / f"{job['custom_id']}.jpg"
                 raw.parent.mkdir(parents=True, exist_ok=True)
-                from synth_reid33_core import atomic_write_bytes
-
                 atomic_write_bytes(raw, image_bytes)
                 final = root / ("pilot/images" if job["scope"] == "pilot" else f"candidates/{sample['split']}") / f"{sample['sample_id']}.jpg"
                 qa = process_image(raw, final, cameras[int(sample["local_camera"])], sample, config)
                 attempt_row["qa"] = qa
                 if qa["accepted"]:
                     job["status"] = "succeeded"
-                    _upsert_manifest(paths["pilot_manifest"] if job["scope"] == "pilot" else paths["manifest"], {
-                        **sample,
-                        "domain": "d05",
-                        "site": cameras[int(sample["local_camera"])]["site"],
-                        "camera_isp": cameras[int(sample["local_camera"])]["isp"],
-                        "processing_version": cameras[int(sample["local_camera"])]["processing_version"],
-                        "prompt_version": config["prompt"]["version"],
-                        "prompt": job["body"]["prompt"],
-                        "prompt_sha256": sha256_bytes(job["body"]["prompt"].encode()),
-                        "reference_asset_ids": job["logical_refs"],
-                        "reference_sha256": [assets[ref]["sha256"] for ref in job["logical_refs"]],
-                        "reference_file_ids": [assets[ref]["file_id"] for ref in job["logical_refs"]],
-                        "model_id": config["model"]["api_id"],
-                        "catalog_snapshot": config["model"]["catalog_snapshot"],
-                        "response_model": body.get("model"),
-                        "request_custom_id": custom_id,
-                        "request_id": attempt_row["request_id"],
-                        "batch_id": batch["batch_id"],
-                        "attempt": job["attempt"],
-                        "quality": job["quality"],
-                        "usage": usage,
-                        "estimated_cost_usd": attempt_row["estimated_cost_usd"],
-                        "qa": qa,
-                        "qa_status": "accepted" if job["scope"] == "pilot" else "geometry_passed",
-                        "final_path": str(final.relative_to(root)),
-                        "final_sha256": qa["final_sha256"],
-                    })
+                    _upsert_manifest(
+                        paths["pilot_manifest"] if job["scope"] == "pilot" else paths["manifest"],
+                        _sample_manifest_row(
+                            root, config, sample, job, attempt_row, cameras, assets, qa, final,
+                            qa_status="accepted" if job["scope"] == "pilot" else "geometry_passed",
+                        ),
+                    )
                 else:
                     job["status"] = "qa_failed"
         batch["collected"] = True
@@ -591,6 +570,53 @@ def _upsert_manifest(path: Path, row: Mapping[str, Any]) -> None:
     }
     by_key[key] = dict(row)
     atomic_write_jsonl(path, sorted(by_key.values(), key=lambda item: (item["sample_id"], item.get("quality", ""))))
+
+
+def _sample_manifest_row(
+    root: Path,
+    config: Mapping[str, Any],
+    sample: Mapping[str, Any],
+    job: Mapping[str, Any],
+    attempt: Mapping[str, Any],
+    cameras: Sequence[Mapping[str, Any]],
+    assets: Mapping[str, Mapping[str, Any]],
+    qa: Mapping[str, Any],
+    final: Path,
+    qa_status: str,
+    selection: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    camera = cameras[int(sample["local_camera"])]
+    row = {
+        **sample,
+        "domain": "d05",
+        "site": camera["site"],
+        "camera_isp": camera["isp"],
+        "camera_processing_version": camera.get("processing_version"),
+        "processing_version": qa.get("processing_version"),
+        "prompt_version": config["prompt"]["version"],
+        "prompt": job["body"]["prompt"],
+        "prompt_sha256": sha256_bytes(job["body"]["prompt"].encode()),
+        "reference_asset_ids": job["logical_refs"],
+        "reference_sha256": [assets[ref]["sha256"] for ref in job["logical_refs"]],
+        "reference_file_ids": [assets[ref]["file_id"] for ref in job["logical_refs"]],
+        "model_id": config["model"]["api_id"],
+        "catalog_snapshot": config["model"]["catalog_snapshot"],
+        "response_model": attempt.get("response_model"),
+        "request_custom_id": job["custom_id"],
+        "request_id": attempt.get("request_id"),
+        "batch_id": attempt.get("batch_id"),
+        "attempt": job["attempt"],
+        "quality": job["quality"],
+        "usage": attempt.get("usage", {}),
+        "estimated_cost_usd": attempt.get("estimated_cost_usd", 0),
+        "qa": dict(qa),
+        "qa_status": qa_status,
+        "final_path": str(final.relative_to(root)),
+        "final_sha256": qa["final_sha256"],
+    }
+    if selection is not None:
+        row["selection"] = dict(selection)
+    return row
 
 
 def _prepare_retries(
@@ -857,7 +883,12 @@ def build_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     return report
 
 
-def _onnx_embeddings(model_path: Path, image_paths: Sequence[Path], batch_size: int = 64) -> Any:
+def _onnx_embeddings(
+    model_path: Path,
+    image_paths: Sequence[Path],
+    batch_size: int = 64,
+    progress_label: str | None = None,
+) -> Any:
     try:
         import cv2
         import numpy as np
@@ -886,6 +917,9 @@ def _onnx_embeddings(model_path: Path, image_paths: Sequence[Path], batch_size: 
         features = features.reshape(features.shape[0], -1).astype(np.float32)
         features /= np.maximum(np.linalg.norm(features, axis=1, keepdims=True), 1e-12)
         output.append(features)
+        completed = min(start + batch_size, len(image_paths))
+        if progress_label and (completed == len(image_paths) or completed % (batch_size * 20) == 0):
+            print(f"{progress_label}: {completed}/{len(image_paths)} images", flush=True)
     return np.concatenate(output, axis=0)
 
 
@@ -1187,6 +1221,151 @@ def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Pa
         print("rejected samples were marked qa_failed; run full --resume for bounded replacements")
 
 
+def _repair_candidate_rank(job: Mapping[str, Any], qa: Mapping[str, Any]) -> tuple[Any, ...]:
+    pose_scores = (qa.get("pose_geometry") or {}).get("region_scores") or {}
+    minimum_pose_score = min((float(value) for value in pose_scores.values()), default=-1e9)
+    detection_score = float((qa.get("person_detection") or {}).get("principal_score", 0.0))
+    return (
+        bool(qa.get("accepted")),
+        minimum_pose_score,
+        detection_score,
+        str(job.get("quality")) == "medium",
+        -int(job.get("attempt", 0)),
+    )
+
+
+def repair_pilot(root: Path, config: Mapping[str, Any], dry_run: bool = False) -> dict[str, Any]:
+    """Re-QA every existing raw pilot attempt and atomically select one per specification."""
+    paths = initialize(root, config)
+    batches = read_jsonl(paths["batches"])
+    active = [
+        batch for batch in batches
+        if batch.get("status") in {"validating", "in_progress", "finalizing", "cancelling"}
+        or (batch.get("status") == "completed" and not batch.get("collected"))
+    ]
+    if active:
+        states = ", ".join(f"{row.get('batch_id')}:{row.get('status')}" for row in active)
+        raise PipelineError(
+            "pilot repair requires every Batch result to be collected first; "
+            f"run pilot --resume after completion ({states})"
+        )
+
+    specs = {row["sample_id"]: row for row in read_jsonl(paths["pilot_samples"])}
+    if len(specs) != 192:
+        raise PipelineError(f"pilot repair expected 192 specifications, found {len(specs)}")
+    jobs = read_jsonl(paths["jobs"])
+    attempts = read_jsonl(paths["attempts"])
+    attempts_by_id = {row["custom_id"]: row for row in attempts}
+    cameras = read_jsonl(paths["cameras"])
+    assets = {row["asset_id"]: row for row in read_jsonl(paths["assets"])}
+    if len(assets) != 81:
+        raise PipelineError(f"pilot repair requires all 81 reference assets, found {len(assets)}")
+
+    candidates: dict[str, list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], Path]]] = defaultdict(list)
+    qa_dir = root / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".pilot-repair-", dir=qa_dir) as temporary:
+        work = Path(temporary)
+        processed = 0
+        for job in jobs:
+            if job.get("scope") != "pilot" or job.get("kind") != "sample":
+                continue
+            attempt = attempts_by_id.get(job["custom_id"])
+            raw = root / "raw" / "pilot" / f"{job['custom_id']}.jpg"
+            if attempt is None or attempt.get("classification") != "succeeded" or not raw.exists():
+                continue
+            sample = specs[job["sample_id"]]
+            candidate_path = work / f"{job['custom_id']}.jpg"
+            qa = process_image(raw, candidate_path, cameras[int(sample["local_camera"])], sample, config)
+            candidates[job["sample_id"]].append((job, attempt, qa, candidate_path))
+            processed += 1
+            if processed % 25 == 0:
+                print(f"pilot repair QA: {processed} raw candidates processed", file=sys.stderr)
+                gc.collect()
+                try:
+                    import torch
+
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                except ImportError:  # pragma: no cover - process_image reports this dependency first
+                    pass
+
+        missing_raw = sorted(set(specs) - set(candidates))
+        selected: dict[str, tuple[dict[str, Any], dict[str, Any], dict[str, Any], Path]] = {}
+        rejected: dict[str, list[dict[str, Any]]] = {}
+        for sample_id, rows in candidates.items():
+            winner = max(rows, key=lambda row: _repair_candidate_rank(row[0], row[2]))
+            if winner[2].get("accepted"):
+                selected[sample_id] = winner
+            else:
+                rejected[sample_id] = [
+                    {
+                        "custom_id": job["custom_id"],
+                        "attempt": job["attempt"],
+                        "quality": job.get("quality"),
+                        "reason": qa.get("reason"),
+                    }
+                    for job, _attempt, qa, _path in rows
+                ]
+
+        report = {
+            "created_at": utc_now(),
+            "processing_version": next(
+                (row[2].get("processing_version") for row in selected.values()), None
+            ),
+            "specifications": len(specs),
+            "raw_candidates": sum(len(rows) for rows in candidates.values()),
+            "selected": len(selected),
+            "missing_raw": missing_raw,
+            "rejected": rejected,
+            "complete": len(selected) == len(specs) and not missing_raw and not rejected,
+            "dry_run": dry_run,
+        }
+        if not report["complete"]:
+            atomic_write_json(qa_dir / "pilot_repair_report.json", report)
+            raise PipelineError(
+                f"pilot repair could select {len(selected)}/192 specifications; "
+                "no manifest or final image was changed"
+            )
+        if dry_run:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return report
+
+        jobs_by_id = {row["custom_id"]: row for row in jobs}
+        for rows in candidates.values():
+            for candidate_job, _attempt, candidate_qa, _candidate_path in rows:
+                jobs_by_id[candidate_job["custom_id"]]["status"] = "superseded"
+                attempts_by_id[candidate_job["custom_id"]]["qa_reprocessed"] = candidate_qa
+                attempts_by_id[candidate_job["custom_id"]]["selected_by_repair"] = False
+        repaired_manifest = []
+        for sample_id in sorted(selected):
+            job, attempt, qa, candidate_path = selected[sample_id]
+            sample = specs[sample_id]
+            final = root / "pilot" / "images" / f"{sample_id}.jpg"
+            atomic_write_bytes(final, candidate_path.read_bytes())
+            qa = dict(qa)
+            qa["final_sha256"] = sha256_file(final)
+            selection = {
+                "method": "best_geometry_candidate",
+                "processing_version": qa.get("processing_version"),
+                "candidate_count": len(candidates[sample_id]),
+                "selected_custom_id": job["custom_id"],
+            }
+            repaired_manifest.append(_sample_manifest_row(
+                root, config, sample, job, attempt, cameras, assets, qa, final,
+                qa_status="accepted", selection=selection,
+            ))
+            attempts_by_id[job["custom_id"]]["selected_by_repair"] = True
+            jobs_by_id[job["custom_id"]]["status"] = "succeeded"
+
+        atomic_write_jsonl(paths["pilot_manifest"], repaired_manifest)
+        atomic_write_jsonl(paths["attempts"], [attempts_by_id[row["custom_id"]] for row in attempts])
+        atomic_write_jsonl(paths["jobs"], sorted(jobs_by_id.values(), key=lambda row: row["custom_id"]))
+        atomic_write_json(qa_dir / "pilot_repair_report.json", report)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return report
+
+
 def command_pilot(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
     jobs, _ = plan_scope(args.root, config, "pilot")
     if args.dry_run:
@@ -1194,6 +1373,10 @@ def command_pilot(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
         print(f"pilot dry-run ready: {len(written)} JSONL files under {written[0].parent if written else args.root}")
         return
     run_live(args.root, config, "pilot")
+
+
+def command_repair_pilot(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
+    repair_pilot(args.root, config, dry_run=args.dry_run)
 
 
 def command_report(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
@@ -1250,6 +1433,8 @@ def build_parser() -> argparse.ArgumentParser:
     pilot = sub.add_parser("pilot", help="plan or advance the 12-ID pilot")
     pilot.add_argument("--dry-run", action="store_true")
     pilot.add_argument("--resume", action="store_true", help="poll completed batches and submit newly unblocked stages")
+    repair = sub.add_parser("repair-pilot", help="re-QA raw pilot attempts and select one per specification")
+    repair.add_argument("--dry-run", action="store_true")
     sub.add_parser("report", help="calculate pilot QA gates and measured cost forecast")
     qa = sub.add_parser("qa", help="run ViT/OSNet QA and create manual contact sheets")
     qa.add_argument("--scope", choices=("pilot", "full"), default="pilot")
@@ -1270,13 +1455,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.root = args.root.resolve()
         {
             "pilot": command_pilot,
+            "repair-pilot": command_repair_pilot,
             "report": command_report,
             "qa": command_qa,
             "approve": command_approve,
             "full": command_full,
         }[args.command](args, config)
         return 0
-    except (PipelineError, ValueError) as exc:
+    except (PipelineError, RuntimeError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 

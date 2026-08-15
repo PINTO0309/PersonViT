@@ -25,8 +25,13 @@ except ImportError as exc:  # pragma: no cover - exercised by CLI preflight
 
 
 SCHEMA_VERSION = "synth-reid33/v1"
-PROCESSING_VERSION = "synth-reid33-isp-v1"
+PROCESSING_VERSION = "synth-reid33-isp-v3-context-crop-torchvision-qa"
 SPLITS = ("train", "query", "gallery")
+PERSON_SCORE_MIN = 0.35
+PERSON_NMS_IOU = 0.35
+POSE_SCORE_MIN = 0.70
+POSE_MATCH_IOU_MIN = 0.30
+KEYPOINT_VISIBILITY_LOGIT_MIN = 0.0
 FINAL_NAME_RE = re.compile(
     r"^p(?P<pid>\d{5})_d(?P<domain>\d{2})_c(?P<camera>\d{3})_(?P<seq>\d{6})\.jpe?g$"
 )
@@ -652,68 +657,155 @@ def hamming_hex(left: str, right: str) -> int:
     return (int(left, 16) ^ int(right, 16)).bit_count()
 
 
-def _person_detection(image: Any) -> tuple[tuple[int, int, int, int] | None, int]:
-    import cv2
+_TORCHVISION_QA_MODELS: dict[str, tuple[Any, Any, Any, str]] = {}
 
-    hog = cv2.HOGDescriptor()
-    hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-    height, width = image.shape[:2]
-    scale = min(1.0, 960.0 / max(height, width))
-    detect = cv2.resize(image, None, fx=scale, fy=scale) if scale < 1 else image
-    boxes, weights = hog.detectMultiScale(detect, winStride=(8, 8), padding=(8, 8), scale=1.05)
-    if not len(boxes):
-        return None, 0
-    x, y, w, h = max(boxes, key=lambda box: int(box[2]) * int(box[3]))
-    return tuple(round(value / scale) for value in (x, y, w, h)), len(boxes)
+
+def _xyxy_iou(left: Sequence[float], right: Sequence[float]) -> float:
+    x0 = max(float(left[0]), float(right[0]))
+    y0 = max(float(left[1]), float(right[1]))
+    x1 = min(float(left[2]), float(right[2]))
+    y1 = min(float(left[3]), float(right[3]))
+    intersection = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    left_area = max(0.0, float(left[2]) - float(left[0])) * max(0.0, float(left[3]) - float(left[1]))
+    right_area = max(0.0, float(right[2]) - float(right[0])) * max(0.0, float(right[3]) - float(right[1]))
+    return intersection / max(left_area + right_area - intersection, 1e-9)
+
+
+def _nms_person_candidates(
+    boxes: Sequence[Sequence[float]], scores: Sequence[float], iou_threshold: float = PERSON_NMS_IOU
+) -> list[int]:
+    """Deterministic NMS for the small set of person detections returned per image."""
+    order = sorted(range(len(boxes)), key=lambda index: (-float(scores[index]), index))
+    kept: list[int] = []
+    for index in order:
+        if all(_xyxy_iou(boxes[index], boxes[other]) <= iou_threshold for other in kept):
+            kept.append(index)
+    return kept
+
+
+def _load_torchvision_qa_model(kind: str) -> tuple[Any, Any, Any, str]:
+    if kind in _TORCHVISION_QA_MODELS:
+        return _TORCHVISION_QA_MODELS[kind]
+    try:
+        import torch
+        if kind == "person":
+            from torchvision.models.detection import (
+                SSDLite320_MobileNet_V3_Large_Weights,
+                ssdlite320_mobilenet_v3_large,
+            )
+
+            weights = SSDLite320_MobileNet_V3_Large_Weights.DEFAULT
+            model = ssdlite320_mobilenet_v3_large(weights=weights)
+        elif kind == "pose":
+            from torchvision.models.detection import (
+                KeypointRCNN_ResNet50_FPN_Weights,
+                keypointrcnn_resnet50_fpn,
+            )
+
+            weights = KeypointRCNN_ResNet50_FPN_Weights.DEFAULT
+            model = keypointrcnn_resnet50_fpn(weights=weights)
+        else:  # pragma: no cover - internal programming error
+            raise ValueError(f"unknown QA model kind: {kind}")
+    except ImportError as exc:  # pragma: no cover - dependency preflight
+        raise RuntimeError("torch and torchvision are required for robust person QA") from exc
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.eval().to(device)
+    value = (model, weights.transforms(), device, weights.name)
+    _TORCHVISION_QA_MODELS[kind] = value
+    return value
+
+
+def _torchvision_input(image: Any, transform: Any, device: Any) -> Any:
+    from PIL import Image
+
+    rgb = image[:, :, ::-1]
+    return transform(Image.fromarray(rgb)).to(device)
+
+
+def _person_detection(image: Any) -> dict[str, Any]:
+    import torch
+
+    model, transform, device, weights_name = _load_torchvision_qa_model("person")
+    tensor = _torchvision_input(image, transform, device)
+    with torch.inference_mode():
+        output = model([tensor])[0]
+    mask = (output["labels"] == 1) & (output["scores"] >= PERSON_SCORE_MIN)
+    boxes = output["boxes"][mask].detach().cpu().tolist()
+    scores = output["scores"][mask].detach().cpu().tolist()
+    kept = _nms_person_candidates(boxes, scores)
+    boxes = [boxes[index] for index in kept]
+    scores = [float(scores[index]) for index in kept]
+    bbox = None
+    if boxes:
+        x0, y0, x1, y1 = boxes[0]
+        bbox = tuple(round(value) for value in (x0, y0, x1 - x0, y1 - y0))
+    return {
+        "bbox": bbox,
+        "count": len(boxes),
+        "candidate_count_before_nms": int(mask.sum().item()),
+        "principal_score": scores[0] if scores else 0.0,
+        "backend": "torchvision_ssdlite320_mobilenet_v3_large",
+        "weights": weights_name,
+        "score_threshold": PERSON_SCORE_MIN,
+        "nms_iou_threshold": PERSON_NMS_IOU,
+    }
 
 
 def _pose_geometry(
     image: Any, occluded: bool, bbox: tuple[int, int, int, int] | None
 ) -> dict[str, Any]:
-    """Fail-closed pose landmark check for required visible body regions."""
-    try:
-        import cv2
-        import mediapipe as mp
-    except (ImportError, AttributeError):
-        if bbox is None:
-            return {"available": False, "backend": "hog_geometry_proxy", "pass": False,
-                    "reason": "person_bbox_unavailable"}
-        _x, _y, width, height = bbox
-        image_height, image_width = image.shape[:2]
-        plausible = height >= image_height * 0.35 and width >= image_width * 0.04
-        names = ("head", "shoulders", "waist") if occluded else ("head", "shoulders", "feet")
-        return {
-            "available": False,
-            "backend": "hog_geometry_proxy",
-            "pass": plausible,
-            "regions": {name: plausible for name in names},
-            "reason": None if plausible else "implausible_full_person_bbox",
-        }
-    with mp.solutions.pose.Pose(static_image_mode=True, model_complexity=1,
-                                enable_segmentation=False, min_detection_confidence=0.5) as pose:
-        result = pose.process(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-    if result.pose_landmarks is None:
-        return {"available": True, "pass": False, "reason": "pose_not_detected"}
-    landmarks = result.pose_landmarks.landmark
-    index = mp.solutions.pose.PoseLandmark
+    """Fail-closed COCO keypoint check for the required visible body regions."""
+    if bbox is None:
+        return {"available": True, "backend": "torchvision_keypointrcnn_resnet50_fpn",
+                "pass": False, "reason": "person_bbox_unavailable"}
+    import torch
 
-    def visible(*names: str) -> bool:
-        return all(float(landmarks[getattr(index, name).value].visibility) >= 0.50 for name in names)
+    model, transform, device, weights_name = _load_torchvision_qa_model("pose")
+    tensor = _torchvision_input(image, transform, device)
+    with torch.inference_mode():
+        output = model([tensor])[0]
+    mask = (output["labels"] == 1) & (output["scores"] >= POSE_SCORE_MIN)
+    indices = torch.where(mask)[0].detach().cpu().tolist()
+    x, y, width, height = bbox
+    principal_xyxy = (x, y, x + width, y + height)
+    matches = [
+        (_xyxy_iou(principal_xyxy, output["boxes"][index].detach().cpu().tolist()),
+         float(output["scores"][index].item()), index)
+        for index in indices
+    ]
+    if not matches:
+        return {"available": True, "backend": "torchvision_keypointrcnn_resnet50_fpn",
+                "weights": weights_name, "pass": False, "reason": "pose_not_detected"}
+    match_iou, pose_score, selected = max(matches)
+    if match_iou < POSE_MATCH_IOU_MIN:
+        return {"available": True, "backend": "torchvision_keypointrcnn_resnet50_fpn",
+                "weights": weights_name, "pass": False, "reason": "pose_does_not_match_principal_person",
+                "match_iou": match_iou, "pose_score": pose_score}
+    if "keypoints_scores" in output:
+        scores = output["keypoints_scores"][selected].detach().cpu().tolist()
+    else:  # pragma: no cover - compatibility with older torchvision
+        scores = output["keypoints"][selected, :, 2].detach().cpu().tolist()
 
-    if occluded:
-        regions = {
-            "head": visible("NOSE"),
-            "shoulders": visible("LEFT_SHOULDER", "RIGHT_SHOULDER"),
-            "waist": visible("LEFT_HIP", "RIGHT_HIP"),
-        }
-    else:
-        regions = {
-            "head": visible("NOSE"),
-            "shoulders": visible("LEFT_SHOULDER", "RIGHT_SHOULDER"),
-            "feet": visible("LEFT_ANKLE", "RIGHT_ANKLE", "LEFT_FOOT_INDEX", "RIGHT_FOOT_INDEX"),
-        }
-    return {"available": True, "backend": "mediapipe_pose", "pass": all(regions.values()), "regions": regions,
-            "reason": None if all(regions.values()) else "required_landmarks_not_visible"}
+    required = {
+        "head": (0,),
+        "shoulders": (5, 6),
+        ("waist" if occluded else "feet"): ((11, 12) if occluded else (15, 16)),
+    }
+    region_scores = {name: min(float(scores[index]) for index in members) for name, members in required.items()}
+    regions = {name: score >= KEYPOINT_VISIBILITY_LOGIT_MIN for name, score in region_scores.items()}
+    passed = all(regions.values())
+    return {
+        "available": True,
+        "backend": "torchvision_keypointrcnn_resnet50_fpn",
+        "weights": weights_name,
+        "pass": passed,
+        "regions": regions,
+        "region_scores": region_scores,
+        "visibility_logit_threshold": KEYPOINT_VISIBILITY_LOGIT_MIN,
+        "match_iou": match_iou,
+        "pose_score": pose_score,
+        "reason": None if passed else "required_landmarks_not_visible",
+    }
 
 
 def _crop_pad_person(image: Any, bbox: tuple[int, int, int, int] | None, margin: float) -> Any:
@@ -728,20 +820,57 @@ def _crop_pad_person(image: Any, bbox: tuple[int, int, int, int] | None, margin:
         crop = image[:, x0 : x0 + crop_width]
     else:
         x, y, w, h = bbox
-        x0 = max(0, math.floor(x - w * margin))
-        x1 = min(width, math.ceil(x + w * (1 + margin)))
-        y0 = max(0, math.floor(y - h * margin))
-        y1 = min(height, math.ceil(y + h * (1 + margin)))
+        x0 = float(x - w * margin)
+        x1 = float(x + w * (1 + margin))
+        y0 = float(y - h * margin)
+        y1 = float(y + h * (1 + margin))
+
+        # Expand the crop into real surrounding image content before padding.
+        # Reflect-padding a tight person crop mirrors limbs, bags, or even the
+        # whole subject at the output edges and creates invalid ReID samples.
+        crop_width = x1 - x0
+        crop_height = y1 - y0
+        if crop_width < crop_height / 2:
+            extra = crop_height / 2 - crop_width
+            x0 -= extra / 2
+            x1 += extra / 2
+        elif crop_height < crop_width * 2:
+            extra = crop_width * 2 - crop_height
+            y0 -= extra / 2
+            y1 += extra / 2
+
+        def fit_interval(start: float, end: float, limit: int) -> tuple[int, int]:
+            length = end - start
+            if length >= limit:
+                return 0, limit
+            if start < 0:
+                end -= start
+                start = 0
+            if end > limit:
+                start -= end - limit
+                end = limit
+            return max(0, math.floor(start)), min(limit, math.ceil(end))
+
+        x0, x1 = fit_interval(x0, x1, width)
+        y0, y1 = fit_interval(y0, y1, height)
         crop = image[y0:y1, x0:x1]
     ch, cw = crop.shape[:2]
     desired_width = ch / 2
     desired_height = cw * 2
+    border = np.concatenate((crop[0], crop[-1], crop[:, 0], crop[:, -1]), axis=0)
+    border_color = tuple(int(value) for value in np.median(border, axis=0))
     if cw < desired_width:
         total = math.ceil(desired_width - cw)
-        crop = cv2.copyMakeBorder(crop, 0, 0, total // 2, total - total // 2, cv2.BORDER_REFLECT_101)
+        crop = cv2.copyMakeBorder(
+            crop, 0, 0, total // 2, total - total // 2,
+            cv2.BORDER_CONSTANT, value=border_color,
+        )
     elif ch < desired_height:
         total = math.ceil(desired_height - ch)
-        crop = cv2.copyMakeBorder(crop, total // 2, total - total // 2, 0, 0, cv2.BORDER_REFLECT_101)
+        crop = cv2.copyMakeBorder(
+            crop, total // 2, total - total // 2, 0, 0,
+            cv2.BORDER_CONSTANT, value=border_color,
+        )
     return cv2.resize(crop, (128, 256), interpolation=cv2.INTER_AREA).astype(np.float32)
 
 
@@ -779,7 +908,9 @@ def process_image(
     if image is None:
         return {"decode": False, "accepted": False, "reason": "decode_failed"}
     raw_height, raw_width = image.shape[:2]
-    bbox, person_count = _person_detection(image)
+    detection = _person_detection(image)
+    bbox = detection["bbox"]
+    person_count = int(detection["count"])
     pose_geometry = _pose_geometry(image, bool(sample["occluded"]), bbox)
     rgb = image[:, :, ::-1].astype(np.float32) / 255.0
     isp = camera["isp"]
@@ -807,14 +938,24 @@ def process_image(
     ok = cv2.imwrite(str(final_path), bgr, [cv2.IMWRITE_JPEG_QUALITY, int(isp["jpeg_quality"])])
     if not ok:
         return {"decode": True, "accepted": False, "reason": "jpeg_write_failed"}
-    geometry = bbox is not None and person_count == 1 and bool(pose_geometry["pass"])
+    principal_person_detected = bbox is not None and person_count == 1
+    geometry = principal_person_detected and bool(pose_geometry["pass"])
+    if bbox is None:
+        reason = "person_not_detected"
+    elif person_count != 1:
+        reason = "multiple_people_detected"
+    elif not pose_geometry["pass"]:
+        reason = str(pose_geometry.get("reason") or "required_landmarks_not_visible")
+    else:
+        reason = None
     return {
         "decode": True,
         "raw_size": [raw_width, raw_height],
         "final_size": [128, 256],
         "person_bbox": list(bbox) if bbox else None,
         "person_detection_count": person_count,
-        "principal_person_detected": bbox is not None and person_count == 1,
+        "person_detection": detection,
+        "principal_person_detected": principal_person_detected,
         "pose_geometry": pose_geometry,
         "geometry_pass": geometry,
         "processing_version": PROCESSING_VERSION,
@@ -822,7 +963,7 @@ def process_image(
         "final_sha256": sha256_file(final_path),
         "phash": perceptual_hash(final_path),
         "accepted": geometry,
-        "reason": None if geometry else "person_detector_failed",
+        "reason": reason,
     }
 
 
