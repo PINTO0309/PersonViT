@@ -28,11 +28,16 @@ from generate_synth_reid33 import (  # noqa: E402
     WAIVABLE_APPROVAL_GATES,
     _approval_failed_gates,
     _batch_failure_summaries,
+    _batch_outstanding_requests,
     _full_embedding_acceptance_models,
+    _live_batch_chunk_size,
+    _local_sibling_raw_candidates,
     _merge_jobs,
     _paths,
     _refresh_and_collect,
     _prepare_retries,
+    _repair_side_anchor_from_mirror,
+    _render_local_sibling_raw,
     _repair_candidate_rank,
     _sample_jobs,
     _write_reference_asset,
@@ -64,9 +69,17 @@ from synth_reid33_core import (  # noqa: E402
     make_rotation_pilot_samples,
     make_samples,
     plate_prompt,
+    _back_view_head_visibility,
     _crop_resize_person,
+    _filter_tiny_secondary_person_candidates,
+    _is_back_facing_sample,
+    _intentional_cart_person_fragment,
     _nms_person_candidates,
+    _occluded_waist_visibility,
     _overlapped_ankle_visibility,
+    _pose_bbox_expansion,
+    _pose_detector_fallback,
+    _select_pose_candidate,
     process_image,
     read_jsonl,
     reconcile_batch_output,
@@ -129,6 +142,50 @@ def test_native_quarter_reference_asset_preserves_source(
     assert metadata["profile"] == "native_quarter"
     assert metadata["reference_size"] == list(reference_size)
     assert metadata["reference_sha256"] == sha256_file(reference)
+
+
+def test_side_anchor_can_be_repaired_locally_from_opposite_view(tmp_path, config):
+    source = tmp_path / "assets" / "anchor-p130-right.jpg"
+    source.parent.mkdir(parents=True)
+    image = Image.new("RGB", (1024, 1536), (20, 30, 40))
+    image.paste((200, 40, 20), (0, 0, 512, 1536))
+    image.save(source, quality=95)
+    assets = {
+        "anchor-p130-right": {
+            "asset_id": "anchor-p130-right",
+            "kind": "anchor",
+            "local_pid": 130,
+            "orientation": "right",
+            "path": str(source.relative_to(tmp_path)),
+            "sha256": sha256_file(source),
+            "reference_sha256": "source-reference-sha",
+            "response_model": "gpt-image-2",
+        },
+    }
+    jobs = [{
+        "custom_id": "asset-anchor-p130-left-a1",
+        "scope": "asset",
+        "kind": "anchor",
+        "asset_id": "anchor-p130-left",
+        "local_pid": 130,
+        "orientation": "left",
+        "status": "needs_revision",
+    }]
+
+    class FakeClient:
+        def upload(self, path, purpose):
+            assert Image.open(path).size == (256, 384)
+            assert purpose == "vision"
+            return "file-local-mirror"
+
+    assert _repair_side_anchor_from_mirror(FakeClient(), tmp_path, config, jobs, assets) == 1
+    repaired = assets["anchor-p130-left"]
+    assert jobs[0]["status"] == "succeeded"
+    assert jobs[0]["completion_mode"] == "local_horizontal_mirror"
+    assert repaired["source_asset_id"] == "anchor-p130-right"
+    assert repaired["file_id"] == "file-local-mirror"
+    repaired_image = Image.open(tmp_path / repaired["path"])
+    assert repaired_image.getpixel((100, 768))[0] < repaired_image.getpixel((900, 768))[0]
 
 
 def test_asset_collection_uploads_native_quarter_copy(tmp_path, config):
@@ -385,6 +442,140 @@ def test_person_nms_suppresses_low_iou_contained_box_from_real_pilot_regression(
     assert _nms_person_candidates(boxes, scores) == [0, 2]
 
 
+def test_person_nms_suppresses_low_confidence_lower_fragment_from_trolley_regression():
+    boxes = [
+        [140.9421, 174.2554, 301.4109, 798.6304],
+        [96.3614, 464.3799, 334.4975, 985.7607],
+    ]
+    scores = [0.9245, 0.3974]
+
+    # The weak box begins at the principal person's lower body and covers the
+    # trolley plus legs.  It overlaps 53.5% of the smaller box but is neither a
+    # conventional IoU duplicate nor fully contained.
+    assert _nms_person_candidates(boxes, scores) == [0]
+
+
+def test_person_nms_suppresses_split_body_trolley_regression():
+    boxes = [
+        [271.6458, 254.1577, 440.5086, 587.6014],
+        [236.8543, 327.8797, 452.9579, 875.6179],
+    ]
+    scores = [0.8435, 0.4703]
+
+    # The two boxes have IoU 0.335 and 77.9% smaller-box overlap.  The weak
+    # lower box covers the person's legs plus the foreground luggage cart.
+    assert _nms_person_candidates(boxes, scores) == [0]
+
+
+@pytest.mark.parametrize(
+    ("secondary_box", "secondary_score"),
+    [
+        ([320, 464, 500, 986], 0.3974),  # spatially independent person
+        ([250, 190, 490, 986], 0.3974),  # overlapping full-height second person
+        ([96, 464, 334, 986], 0.60),  # confident overlapping second person
+        ([237, 328, 453, 876], 0.60),  # confident split-body-shaped candidate
+        ([220, 350, 470, 900], 0.47),  # insufficient smaller-box overlap
+    ],
+)
+def test_person_nms_keeps_candidates_outside_lower_fragment_rule(
+    secondary_box, secondary_score
+):
+    boxes = [[141, 174, 301, 799], secondary_box]
+    scores = [0.9245, secondary_score]
+
+    assert _nms_person_candidates(boxes, scores) == [0, 1]
+
+
+def test_intentional_cart_fragment_accepts_real_occlusion_regression():
+    detection = {
+        "count": 2,
+        "candidate_boxes_xyxy": [
+            [151.0048, 181.2913, 432.4798, 535.9988],
+            [104.7411, 268.3246, 434.3389, 1050.5164],
+        ],
+        "candidate_scores": [0.7035, 0.5105],
+    }
+    pose = {"pass": True, "pose_candidate_count": 1}
+    sample = {
+        "occluded": True,
+        "occluder": "plain luggage cart",
+        "target_occlusion_ratio": 0.4492,
+    }
+
+    result = _intentional_cart_person_fragment(detection, pose, sample)
+
+    assert result["pass"] is True
+    assert result["candidate_extends_below"] is True
+    assert result["smaller_box_overlap"] >= 0.70
+
+
+def test_tiny_secondary_person_filter_suppresses_real_edge_artifact():
+    boxes = [
+        [66.329, 330.612, 205.135, 741.614],
+        [543.973, 173.618, 556.363, 237.258],
+    ]
+    scores = [0.9929, 0.3735]
+
+    kept, suppressed = _filter_tiny_secondary_person_candidates(
+        boxes, scores, (576, 1152)
+    )
+
+    assert kept == [0]
+    assert suppressed[0]["index"] == 1
+
+
+@pytest.mark.parametrize(
+    ("secondary_box", "secondary_score"),
+    [
+        ([500, 170, 530, 240], 0.37),  # wide enough to remain relevant
+        ([544, 174, 556, 300], 0.37),  # tall enough to remain relevant
+        ([544, 174, 556, 237], 0.80),  # strongly supported tiny person
+    ],
+)
+def test_tiny_secondary_person_filter_keeps_non_artifacts(
+    secondary_box, secondary_score
+):
+    kept, suppressed = _filter_tiny_secondary_person_candidates(
+        [[66, 331, 205, 742], secondary_box],
+        [0.99, secondary_score],
+        (576, 1152),
+    )
+
+    assert kept == [0, 1]
+    assert suppressed == []
+
+
+@pytest.mark.parametrize(
+    ("sample_update", "pose_update", "score", "reason"),
+    [
+        ({"occluded": False}, {}, 0.5105, "not occluded"),
+        ({"occluder": "plain railing"}, {}, 0.5105, "not a cart"),
+        ({}, {"pose_candidate_count": 2}, 0.5105, "ambiguous pose"),
+        ({}, {}, 0.61, "confident second person"),
+    ],
+)
+def test_intentional_cart_fragment_rejects_unsafe_cases(
+    sample_update, pose_update, score, reason
+):
+    detection = {
+        "count": 2,
+        "candidate_boxes_xyxy": [
+            [151, 181, 432, 536],
+            [105, 268, 434, 1051],
+        ],
+        "candidate_scores": [0.7035, score],
+    }
+    pose = {"pass": True, "pose_candidate_count": 1, **pose_update}
+    sample = {
+        "occluded": True,
+        "occluder": "plain luggage cart",
+        "target_occlusion_ratio": 0.4492,
+        **sample_update,
+    }
+
+    assert _intentional_cart_person_fragment(detection, pose, sample)["pass"] is False, reason
+
+
 @pytest.mark.parametrize(
     ("scores", "points", "bbox", "expected_reason"),
     [
@@ -418,6 +609,570 @@ def test_overlapped_ankle_fallback_accepts_visible_rotation_pilot_regressions(
     assert result["strong_ankle_visible"]
     assert result["ankle_locations_valid"] == [True, True]
     assert result["person_not_bottom_clipped"]
+
+
+def test_overlapped_ankle_fallback_accepts_real_crossed_leg_regression():
+    result = _overlapped_ankle_visibility(
+        [-4.812676, 11.165815],
+        [[367.642, 822.249], [395.281, 853.320]],
+        (287, 276, 210, 652),
+        (576, 1152),
+    )
+
+    assert result["pass"] is True
+    assert result["ankles_overlap"] is True
+    assert result["strong_ankle_visible"] is True
+
+
+@pytest.mark.parametrize(
+    ("scores", "points", "bbox"),
+    [
+        ([-1.299072, 9.422829], [[268.826, 732.555], [254.161, 812.843]], (199, 329, 145, 517)),
+        ([-1.522069, 8.900734], [[215.769, 697.131], [246.866, 776.592]], (160, 313, 139, 519)),
+    ],
+)
+def test_overlapped_ankle_fallback_accepts_moderately_weak_separated_feet(
+    scores, points, bbox
+):
+    result = _overlapped_ankle_visibility(scores, points, bbox, (576, 1152))
+
+    assert result["pass"] is True
+    assert result["moderate_weak_ankle"] is True
+    assert result["ankles_overlap"] is False
+
+
+def test_overlapped_ankle_fallback_accepts_longitudinal_self_occlusion():
+    result = _overlapped_ankle_visibility(
+        [-2.554703, 9.315398],
+        [[146.475, 757.395], [134.369, 861.934]],
+        (62, 438, 165, 456),
+        (576, 1152),
+        knee_scores=[5.679, 9.347],
+        knee_points=[[143.0, 748.8], [148.2, 764.3]],
+        walking_pose=True,
+    )
+
+    assert result["pass"] is True
+    assert result["longitudinal_leg_overlap"] is True
+    assert result["weak_ankle_near_knee"] is True
+    assert result["strong_ankle_below_weak"] is True
+
+
+def test_overlapped_ankle_fallback_accepts_deep_high_confidence_longitudinal_leg():
+    result = _overlapped_ankle_visibility(
+        [11.4089, -4.1573],
+        [[385.607, 859.738], [415.875, 746.587]],
+        (303, 360, 197, 575),
+        (576, 1152),
+        knee_scores=[14.2049, 6.3966],
+        knee_points=[[390, 720], [408, 750]],
+        walking_pose=True,
+        pose_score=0.999877,
+    )
+
+    assert result["pass"] is True
+    assert result["longitudinal_leg_overlap"] is True
+    assert result["deep_longitudinal_pose_support"] is True
+
+
+def test_deep_longitudinal_leg_requires_high_pose_confidence():
+    result = _overlapped_ankle_visibility(
+        [11.4089, -4.1573],
+        [[385.607, 859.738], [415.875, 746.587]],
+        (303, 360, 197, 575),
+        (576, 1152),
+        knee_scores=[14.2049, 6.3966],
+        knee_points=[[390, 720], [408, 750]],
+        walking_pose=True,
+        pose_score=0.98,
+    )
+
+    assert result["pass"] is False
+    assert result["deep_longitudinal_pose_support"] is False
+
+
+def test_high_confidence_longitudinal_leg_allows_ten_percent_knee_proximity():
+    result = _overlapped_ankle_visibility(
+        [-2.2490, 8.8488],
+        [[152.881, 754.011], [145.976, 829.107]],
+        (70, 340, 158, 512),
+        (576, 1152),
+        knee_scores=[6.9438, 9.8717],
+        knee_points=[[142.523, 706.537], [161.511, 709.126]],
+        walking_pose=True,
+        pose_score=0.999736,
+    )
+
+    assert result["pass"] is True
+    assert result["weak_ankle_near_knee"] is False
+    assert result["high_confidence_weak_ankle_near_knee"] is True
+
+
+@pytest.mark.parametrize("pose_score", [None, 0.989])
+def test_extended_knee_proximity_requires_high_pose_confidence(pose_score):
+    result = _overlapped_ankle_visibility(
+        [-2.2490, 8.8488],
+        [[152.881, 754.011], [145.976, 829.107]],
+        (70, 340, 158, 512),
+        (576, 1152),
+        knee_scores=[6.9438, 9.8717],
+        knee_points=[[142.523, 706.537], [161.511, 709.126]],
+        walking_pose=True,
+        pose_score=pose_score,
+    )
+
+    assert result["pass"] is False
+    assert result["high_confidence_weak_ankle_near_knee"] is False
+
+
+@pytest.mark.parametrize(
+    ("ankle_scores", "knee_scores", "knee_points", "walking_pose", "reason"),
+    [
+        ([-3.01, 9.3], [5.7, 9.3], [[143, 749], [148, 764]], True, "too_weak"),
+        ([-2.55, 9.3], [4.9, 9.3], [[143, 749], [148, 764]], True, "weak_knee"),
+        ([-2.55, 9.3], [5.7, 9.3], [[100, 600], [110, 620]], True, "far_knee"),
+        ([-2.55, 9.3], [5.7, 9.3], [[143, 749], [148, 764]], False, "not_walking"),
+    ],
+)
+def test_longitudinal_self_occlusion_rejects_unsafe_cases(
+    ankle_scores, knee_scores, knee_points, walking_pose, reason
+):
+    result = _overlapped_ankle_visibility(
+        ankle_scores,
+        [[146.475, 757.395], [134.369, 861.934]],
+        (62, 438, 165, 456),
+        (576, 1152),
+        knee_scores=knee_scores,
+        knee_points=knee_points,
+        walking_pose=walking_pose,
+    )
+
+    assert result["pass"] is False, reason
+
+
+def test_pose_bbox_expansion_accepts_complete_small_person_regression():
+    result = _pose_bbox_expansion(
+        (269, 374, 77, 243),
+        [210.82, 364.07, 377.62, 758.65],
+        0.9998467,
+        {"head": 14.649, "shoulders": 7.069, "feet": 5.612},
+        (576, 1152),
+        occluded=False,
+    )
+
+    assert result["pass"] is True
+    assert result["principal_containment"] >= 0.85
+    assert result["match_iou"] >= 0.25
+    assert result["expanded_bbox"] == [210, 364, 168, 395]
+
+
+def test_pose_bbox_expansion_accepts_real_cart_occlusion_regression():
+    result = _pose_bbox_expansion(
+        (272, 203, 99, 236),
+        [253.992, 176.827, 427.828, 638.420],
+        0.99982196,
+        {"head": 5.0, "shoulders": 5.0, "waist": 5.0},
+        (576, 1152),
+        occluded=True,
+        occluder="plain luggage cart",
+        target_occlusion_ratio=0.2672,
+    )
+
+    assert result["pass"] is True
+    assert result["cart_occlusion"] is True
+    assert result["expanded_bbox"] == [253, 176, 175, 463]
+
+
+@pytest.mark.parametrize(
+    ("occluder", "ratio"),
+    [
+        ("railing", 0.2672),
+        ("plain luggage cart", 0.19),
+        ("plain luggage cart", 0.51),
+    ],
+)
+def test_pose_bbox_expansion_rejects_nonqualifying_occluded_expansion(
+    occluder, ratio
+):
+    result = _pose_bbox_expansion(
+        (272, 203, 99, 236),
+        [253.992, 176.827, 427.828, 638.420],
+        0.99982196,
+        {"head": 5.0, "shoulders": 5.0, "waist": 5.0},
+        (576, 1152),
+        occluded=True,
+        occluder=occluder,
+        target_occlusion_ratio=ratio,
+    )
+
+    assert result["pass"] is False
+
+
+@pytest.mark.parametrize(
+    ("pose_score", "regions", "pose_box", "occluded"),
+    [
+        (0.98, {"head": 5, "shoulders": 5, "feet": 5}, [210, 364, 378, 759], False),
+        (0.999, {"head": 5, "shoulders": -0.1, "feet": 5}, [210, 364, 378, 759], False),
+        (0.999, {"head": 5, "shoulders": 5, "feet": 5}, [100, 200, 500, 1000], False),
+        (0.999, {"head": 5, "shoulders": 5, "waist": 5}, [210, 364, 378, 759], True),
+    ],
+)
+def test_pose_bbox_expansion_rejects_unsafe_cases(
+    pose_score, regions, pose_box, occluded
+):
+    result = _pose_bbox_expansion(
+        (269, 374, 77, 243),
+        pose_box,
+        pose_score,
+        regions,
+        (576, 1152),
+        occluded,
+    )
+
+    assert result["pass"] is False
+
+
+def test_pose_detector_fallback_accepts_single_complete_real_regression():
+    scores = [0.0] * 17
+    scores[0] = 5.371
+    scores[5] = 8.680
+    scores[6] = 9.0
+    scores[11] = 7.881
+    scores[12] = 8.0
+    result = _pose_detector_fallback(
+        [[249.285, 252.820, 348.362, 503.539]],
+        [0.999076],
+        [scores],
+        occluded=True,
+        image_size=(576, 1152),
+    )
+
+    assert result["pass"] is True
+    assert result["bbox"] == [249, 252, 100, 252]
+    assert result["required_regions_visible"] is True
+
+
+@pytest.mark.parametrize(
+    ("boxes", "pose_scores", "score_update", "reason"),
+    [
+        ([], [], {}, "no candidate"),
+        (
+            [[249, 253, 348, 504], [50, 100, 200, 500]],
+            [0.999, 0.998],
+            {},
+            "ambiguous candidates",
+        ),
+        ([[249, 253, 348, 504]], [0.989], {}, "pose score too low"),
+        ([[249, 253, 348, 504]], [0.999], {11: -0.1}, "waist missing"),
+        ([[249, 253, 260, 504]], [0.999], {}, "box too narrow"),
+        ([[249, 1, 348, 504]], [0.999], {}, "box at image edge"),
+    ],
+)
+def test_pose_detector_fallback_rejects_unsafe_cases(
+    boxes, pose_scores, score_update, reason
+):
+    base_scores = [0.0] * 17
+    for index, value in {0: 5.4, 5: 8.7, 6: 9.0, 11: 7.9, 12: 8.0}.items():
+        base_scores[index] = value
+    for index, value in score_update.items():
+        base_scores[index] = value
+    rows = [list(base_scores) for _ in boxes]
+
+    result = _pose_detector_fallback(
+        boxes, pose_scores, rows, occluded=True, image_size=(576, 1152)
+    )
+
+    assert result["pass"] is False, reason
+
+
+def test_split_pose_candidate_fallback_selects_complete_occluded_upper_body():
+    matches = [(0.521, 0.999, 0), (0.643, 0.959, 1)]
+    score_rows = {
+        0: [15.271, 0, 0, 0, 0, 8.993, 9.161, 0, 0, 0, 0, 8.946, 9.863, 0, 0, -3.404, -3.416],
+        1: [-3.440, 0, 0, 0, 0, -7.684, -6.311, 0, 0, 0, 0, 9.009, 7.964, 0, 0, 6.697, 2.694],
+    }
+
+    selected, fallback = _select_pose_candidate(matches, score_rows, occluded=True)
+
+    assert selected == matches[0]
+    assert fallback is not None
+    assert fallback["pass"] is True
+    assert fallback["initial_candidate_index"] == 1
+    assert fallback["selected_candidate_index"] == 0
+
+
+def test_split_pose_candidate_fallback_does_not_merge_incomplete_candidates():
+    matches = [(0.51, 0.99, 0), (0.64, 0.96, 1)]
+    score_rows = {
+        0: [8, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0, -2, 8, 0, 0, 0, 0],
+        1: [-2, 0, 0, 0, 0, -2, -2, 0, 0, 0, 0, 8, 8, 0, 0, 0, 0],
+    }
+
+    selected, fallback = _select_pose_candidate(matches, score_rows, occluded=True)
+
+    assert selected == matches[1]
+    assert fallback is None
+
+
+def test_complete_pose_candidate_fallback_selects_visible_non_occluded_feet():
+    matches = [(0.63998, 0.99789, 0), (0.68294, 0.86319, 1)]
+    score_rows = {
+        0: [14.85, 0, 0, 0, 0, 7.49, 8.0, 0, 0, 0, 0, 8, 8, 10.12, 6.93, 6.62, 4.02],
+        1: [13.44, 0, 0, 0, 0, 6.94, 8.0, 0, 0, 0, 0, 8, 8, 3.70, 5.19, -5.08, -5.33],
+    }
+
+    selected, fallback = _select_pose_candidate(matches, score_rows, occluded=False)
+
+    assert selected == matches[0]
+    assert fallback is not None
+    assert fallback["initial_candidate_index"] == 1
+    assert fallback["selected_candidate_index"] == 0
+    assert fallback["selected_region_scores"]["feet"] == pytest.approx(4.02)
+
+
+def test_back_view_head_fallback_accepts_weak_face_keypoint_only_in_safe_head_region():
+    accepted = _back_view_head_visibility(
+        -0.75,
+        (400.0, 360.0),
+        (342, 322, 126, 311),
+        (576, 1152),
+    )
+    misplaced = _back_view_head_visibility(
+        -0.75,
+        (400.0, 600.0),
+        (342, 322, 126, 311),
+        (576, 1152),
+    )
+    too_weak = _back_view_head_visibility(
+        -1.01,
+        (400.0, 360.0),
+        (342, 322, 126, 311),
+        (576, 1152),
+    )
+
+    assert accepted["pass"] is True
+    assert accepted["head_location_valid"] is True
+    assert misplaced["pass"] is False
+    assert too_weak["pass"] is False
+
+
+def test_back_view_head_fallback_accepts_deep_score_with_strong_shoulder_support():
+    accepted = _back_view_head_visibility(
+        -1.216256,
+        (352.402, 304.957),
+        (316, 278, 144, 475),
+        (576, 1152),
+        supporting_shoulder_score=8.087672,
+    )
+    weak_shoulders = _back_view_head_visibility(
+        -1.216256,
+        (352.402, 304.957),
+        (316, 278, 144, 475),
+        (576, 1152),
+        supporting_shoulder_score=4.99,
+    )
+    misplaced = _back_view_head_visibility(
+        -1.216256,
+        (352.402, 400.0),
+        (316, 278, 144, 475),
+        (576, 1152),
+        supporting_shoulder_score=8.087672,
+    )
+
+    assert accepted["pass"] is True
+    assert accepted["deep_supported_head"] is True
+    assert weak_shoulders["pass"] is False
+    assert misplaced["pass"] is False
+
+
+def test_occluded_waist_fallback_accepts_real_low_wall_regression():
+    result = _occluded_waist_visibility(
+        [-0.777958, 0.369189],
+        [[312.984, 492.299], [311.258, 492.299]],
+        (303, 298, 125, 203),
+        (576, 1152),
+        0.498,
+    )
+
+    assert result["pass"] is True
+    assert result["strong_hip_visible"] is True
+    assert result["weak_hip_bounded"] is True
+    assert result["hip_locations_valid"] == [True, True]
+    assert result["person_not_bottom_clipped"] is True
+    assert result["requested_occlusion_valid"] is True
+
+
+@pytest.mark.parametrize(
+    ("scores", "points", "bbox", "ratio", "expected_reason"),
+    [
+        ([-1.01, 5.0], [[150, 700], [250, 710]], (100, 100, 200, 700), 0.4, "weak"),
+        ([-0.5, -0.2], [[150, 700], [250, 710]], (100, 100, 200, 700), 0.4, "no_strong"),
+        ([-0.5, 5.0], [[150, 300], [250, 710]], (100, 100, 200, 700), 0.4, "not_lower"),
+        ([-0.5, 5.0], [[150, 1050], [250, 1060]], (100, 400, 200, 750), 0.4, "clipped"),
+        ([-0.5, 5.0], [[150, 700], [250, 710]], (100, 100, 200, 700), 0.0, "not_requested"),
+    ],
+)
+def test_occluded_waist_fallback_rejects_unsafe_cases(
+    scores, points, bbox, ratio, expected_reason
+):
+    result = _occluded_waist_visibility(scores, points, bbox, (576, 1152), ratio)
+
+    assert result["pass"] is False, expected_reason
+
+
+def test_occluded_waist_fallback_accepts_high_occlusion_wall_boundary():
+    result = _occluded_waist_visibility(
+        [-1.79399, -0.92716],
+        [[406.396, 498.784], [350.234, 498.784]],
+        (308, 198, 161, 322),
+        (576, 1152),
+        0.4918,
+        occluder="low wall",
+        head_score=12.6249,
+        shoulder_score=8.0469,
+        pose_score=0.9973,
+    )
+
+    assert result["pass"] is True
+    assert result["ordinary_waist"] is False
+    assert result["wall_boundary_waist"] is True
+    assert result["boundary_locations_valid"] is True
+
+
+def test_occluded_waist_fallback_accepts_high_occlusion_bollard_boundary():
+    result = _occluded_waist_visibility(
+        [-1.2122, -1.8092],
+        [[327.932, 413.287], [321.014, 413.287]],
+        (261, 217, 97, 200),
+        (576, 1152),
+        0.4824,
+        occluder="bollard",
+        head_score=12.1756,
+        shoulder_score=8.0509,
+        pose_score=0.97465,
+    )
+
+    assert result["pass"] is True
+    assert result["ordinary_waist"] is False
+    assert result["bollard_boundary_waist"] is True
+    assert result["bollard_hips_aligned"] is True
+
+
+@pytest.mark.parametrize(
+    ("points", "pose_score", "reason"),
+    [
+        ([[328, 413], [300, 413]], 0.975, "hips not aligned"),
+        ([[328, 413], [321, 413]], 0.949, "weak pose"),
+    ],
+)
+def test_bollard_boundary_waist_rejects_unsafe_cases(points, pose_score, reason):
+    result = _occluded_waist_visibility(
+        [-1.21, -1.81],
+        points,
+        (261, 217, 97, 200),
+        (576, 1152),
+        0.4824,
+        occluder="bollard",
+        head_score=12.2,
+        shoulder_score=8.1,
+        pose_score=pose_score,
+    )
+
+    assert result["pass"] is False, reason
+
+
+def test_occluded_waist_fallback_accepts_high_occlusion_railing_boundary():
+    result = _occluded_waist_visibility(
+        [-2.2071, -0.2478],
+        [[279.926, 491.665], [211.889, 491.665]],
+        (185, 274, 125, 217),
+        (576, 1152),
+        0.4631,
+        occluder="railing",
+        head_score=12.7017,
+        shoulder_score=7.7005,
+        pose_score=0.9923,
+    )
+
+    assert result["pass"] is True
+    assert result["ordinary_waist"] is False
+    assert result["railing_boundary_waist"] is True
+    assert result["railing_hips_bounded"] is True
+
+
+@pytest.mark.parametrize(
+    ("scores", "pose_score", "reason"),
+    [
+        ([-2.51, -0.24], 0.992, "occluded hip too weak"),
+        ([-2.20, -0.51], 0.992, "supporting hip too weak"),
+        ([-2.20, -0.24], 0.989, "pose too weak"),
+    ],
+)
+def test_railing_boundary_waist_rejects_unsafe_cases(scores, pose_score, reason):
+    result = _occluded_waist_visibility(
+        scores,
+        [[280, 492], [212, 492]],
+        (185, 274, 125, 217),
+        (576, 1152),
+        0.4631,
+        occluder="railing",
+        head_score=12.7,
+        shoulder_score=7.7,
+        pose_score=pose_score,
+    )
+
+    assert result["pass"] is False, reason
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "reason"),
+    [
+        ({"occluder": "plain railing"}, "not a wall"),
+        ({"target_occlusion_ratio": 0.39}, "not high occlusion"),
+        ({"scores": [-2.01, -0.9]}, "hip too weak"),
+        ({"shoulder_score": 4.9}, "weak upper-body support"),
+        ({"pose_score": 0.98}, "weak pose"),
+        ({"points": [[406, 400], [350, 400]]}, "hips not at boundary"),
+    ],
+)
+def test_wall_boundary_waist_rejects_unsafe_cases(kwargs, reason):
+    values = {
+        "scores": [-1.79, -0.93],
+        "points": [[406, 499], [350, 499]],
+        "target_occlusion_ratio": 0.4918,
+        "occluder": "low wall",
+        "head_score": 12.6,
+        "shoulder_score": 8.0,
+        "pose_score": 0.997,
+        **kwargs,
+    }
+    result = _occluded_waist_visibility(
+        values["scores"],
+        values["points"],
+        (308, 198, 161, 322),
+        (576, 1152),
+        values["target_occlusion_ratio"],
+        occluder=values["occluder"],
+        head_score=values["head_score"],
+        shoulder_score=values["shoulder_score"],
+        pose_score=values["pose_score"],
+    )
+
+    assert result["pass"] is False, reason
+
+
+@pytest.mark.parametrize(
+    ("sample", "expected"),
+    [
+        ({"body_yaw_deg": 135}, True),
+        ({"body_yaw_deg": -135}, True),
+        ({"body_yaw_deg": 90}, False),
+        ({"anchor_orientation": "back"}, True),
+        ({"orientation": "front"}, False),
+    ],
+)
+def test_back_facing_sample_detection_is_restricted_to_rear_yaws(sample, expected):
+    assert _is_back_facing_sample(sample) is expected
 
 
 def test_person_crop_uses_five_percent_tight_box_and_direct_reid_resize():
@@ -678,6 +1433,34 @@ def test_batch_capacity_rejection_returns_jobs_to_first_submission_queue(tmp_pat
     assert _batch_failure_summaries(batches) == []
 
 
+@pytest.mark.parametrize(
+    ("batch", "expected"),
+    [
+        ({"status": "completed", "custom_ids": list(range(400))}, 0),
+        ({"status": "validating", "custom_ids": list(range(400))}, 400),
+        ({
+            "status": "in_progress",
+            "custom_ids": list(range(400)),
+            "remote": {"request_counts": {"total": 400, "completed": 219, "failed": 1}},
+        }, 400),
+        ({
+            "status": "finalizing",
+            "custom_ids": list(range(88)),
+            "remote": {"request_counts": {"total": 88, "completed": 87, "failed": 0}},
+        }, 88),
+    ],
+)
+def test_batch_outstanding_request_count_tracks_active_quota_reservation(batch, expected):
+    assert _batch_outstanding_requests(batch) == expected
+
+
+def test_full_live_batches_use_small_chunks_without_changing_pilot_batches(config):
+    assert config["batch"]["requests_per_sample_batch"] == 400
+    assert _live_batch_chunk_size(config, "full") == 100
+    assert _live_batch_chunk_size(config, "pilot") == 400
+    assert _live_batch_chunk_size(config, "rotation_pilot") == 400
+
+
 def test_cost_ceiling_stops_before_next_batch():
     enforce_cost_ceiling(80.0, 10.0, 9.99, 100.0)
     with pytest.raises(PipelineError, match="cost stop"):
@@ -779,6 +1562,49 @@ def test_local_repair_rebuilds_from_raw_without_creating_api_attempts(
     assert failures["automatic_api_retries"] == 0
     assert failures["awaiting_first_attempt"] == 95
     assert failures["failed_without_successful_raw"] == 0
+
+
+def test_local_sibling_repair_selects_same_identity_camera_and_mirrors_walking_side(
+    tmp_path,
+):
+    source_raw = tmp_path / "source.jpg"
+    image = Image.new("RGB", (100, 200), (20, 30, 40))
+    image.paste((220, 30, 20), (0, 0, 50, 200))
+    image.save(source_raw, quality=100)
+    target = {
+        "sample_id": "target",
+        "local_pid": 189,
+        "local_camera": 15,
+        "split": "train",
+        "occluded": False,
+        "body_yaw_deg": 0,
+        "frame": 3,
+        "pose": "walking right foot forward",
+        "generation_seed": 123,
+    }
+    source = {
+        **target,
+        "sample_id": "source",
+        "body_yaw_deg": -45,
+        "frame": 2,
+        "pose": "walking left foot forward",
+    }
+    job = {"custom_id": "full-source-a1"}
+    attempt = {"classification": "succeeded"}
+    candidates = _local_sibling_raw_candidates(
+        "target",
+        {"target": target, "source": source},
+        {"source": [(job, attempt, source_raw)]},
+    )
+
+    assert candidates[0][0]["sample_id"] == "source"
+    destination = tmp_path / "derived.jpg"
+    transform = _render_local_sibling_raw(
+        source_raw, destination, source, target
+    )
+    derived = Image.open(destination).convert("RGB")
+    assert transform["mirrored"] is True
+    assert derived.getpixel((10, 100))[0] < derived.getpixel((90, 100))[0]
 
 
 def test_approval_requires_every_pilot_gate(config):

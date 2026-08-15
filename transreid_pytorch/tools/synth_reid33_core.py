@@ -25,7 +25,7 @@ except ImportError as exc:  # pragma: no cover - exercised by CLI preflight
 
 
 SCHEMA_VERSION = "synth-reid33/v1"
-PROCESSING_VERSION = "synth-reid33-isp-v6-overlapped-ankle-qa"
+PROCESSING_VERSION = "synth-reid33-isp-v22-cart-occlusion-pose-expansion-qa"
 CAMERA_GEOMETRY_VERSION = "synth-reid33-camera-geometry-v1"
 PROMPT_VERSION = "synth-reid33-prompt-v3-eight-yaw-camera-pitch"
 SPLITS = ("train", "query", "gallery")
@@ -34,11 +34,57 @@ ANCHOR_ORIENTATIONS = {"front", "left", "right", "back"}
 PERSON_SCORE_MIN = 0.35
 PERSON_NMS_IOU = 0.35
 PERSON_NMS_CONTAINMENT = 0.85
+PERSON_FRAGMENT_SCORE_MAX = 0.45
+PERSON_FRAGMENT_OVERLAP_MIN = 0.50
+PERSON_FRAGMENT_TOP_FRACTION_MIN = 0.40
+PERSON_SPLIT_BODY_SCORE_MAX = 0.50
+PERSON_SPLIT_BODY_IOU_MIN = 0.30
+PERSON_SPLIT_BODY_OVERLAP_MIN = 0.75
+PERSON_TINY_SECONDARY_SCORE_MAX = 0.50
+PERSON_TINY_SECONDARY_WIDTH_FRACTION_MAX = 0.03
+PERSON_TINY_SECONDARY_HEIGHT_FRACTION_MAX = 0.08
+PERSON_CART_FRAGMENT_SCORE_MAX = 0.60
+PERSON_CART_FRAGMENT_IOU_MIN = 0.20
+PERSON_CART_FRAGMENT_OVERLAP_MIN = 0.70
+PERSON_CART_FRAGMENT_TOP_FRACTION_MIN = 0.15
 POSE_SCORE_MIN = 0.70
 POSE_MATCH_IOU_MIN = 0.30
+POSE_DETECTOR_FALLBACK_SCORE_MIN = 0.99
+POSE_DETECTOR_FALLBACK_WIDTH_FRACTION_MIN = 0.05
+POSE_DETECTOR_FALLBACK_HEIGHT_FRACTION_MIN = 0.15
+POSE_DETECTOR_FALLBACK_FRACTION_MAX = 0.95
 KEYPOINT_VISIBILITY_LOGIT_MIN = 0.0
-SECONDARY_ANKLE_LOGIT_MIN = -2.0
+SECONDARY_ANKLE_LOGIT_MIN = -5.0
+MODERATE_ANKLE_LOGIT_MIN = -2.0
+STRONG_ANKLE_FALLBACK_LOGIT_MIN = 5.0
+LONGITUDINAL_ANKLE_LOGIT_MIN = -3.0
+KNEE_SUPPORT_LOGIT_MIN = 5.0
+SECONDARY_HIP_LOGIT_MIN = -1.0
+HIGH_OCCLUSION_HIP_LOGIT_MIN = -2.0
+HIGH_OCCLUSION_HIP_SUPPORT_LOGIT_MIN = -1.0
+HIGH_OCCLUSION_REGION_SUPPORT_LOGIT_MIN = 5.0
+HIGH_OCCLUSION_POSE_SCORE_MIN = 0.99
+HIP_OCCLUSION_BOUNDARY_FRACTION_MIN = 0.80
+BOLLARD_OCCLUSION_POSE_SCORE_MIN = 0.95
+BOLLARD_HIP_PAIR_DISTANCE_FRACTION_MAX = 0.15
+RAILING_OCCLUSION_HIP_LOGIT_MIN = -2.5
+RAILING_OCCLUSION_HIP_SUPPORT_LOGIT_MIN = -0.5
+BACK_VIEW_HEAD_LOGIT_MIN = -1.5
+MODERATE_BACK_VIEW_HEAD_LOGIT_MIN = -1.0
+BACK_VIEW_SHOULDER_SUPPORT_LOGIT_MIN = 5.0
+HEAD_UPPER_BODY_FRACTION_MAX = 0.40
+DEEP_BACK_HEAD_UPPER_BODY_FRACTION_MAX = 0.20
 ANKLE_LOWER_BODY_FRACTION_MIN = 0.65
+ANKLE_PAIR_DISTANCE_FRACTION_MAX = 0.12
+ANKLE_KNEE_DISTANCE_FRACTION_MAX = 0.08
+ANKLE_KNEE_HIGH_CONF_DISTANCE_FRACTION_MAX = 0.10
+ANKLE_VERTICAL_SEPARATION_FRACTION_MIN = 0.10
+POSE_BBOX_EXPANSION_IOU_MIN = 0.25
+POSE_BBOX_EXPANSION_CONTAINMENT_MIN = 0.85
+POSE_BBOX_EXPANSION_SCORE_MIN = 0.99
+POSE_BBOX_EXPANSION_AREA_RATIO_MAX = 4.0
+POSE_BBOX_EXPANSION_CENTER_DISTANCE_MAX = 0.35
+HIP_LOWER_BODY_FRACTION_MIN = 0.45
 KEYPOINT_BBOX_TOLERANCE_FRACTION = 0.05
 PERSON_BOTTOM_CLEARANCE_FRACTION_MIN = 0.005
 FINAL_NAME_RE = re.compile(
@@ -1083,18 +1129,92 @@ def _nms_person_candidates(
     iou_threshold: float = PERSON_NMS_IOU,
     containment_threshold: float = PERSON_NMS_CONTAINMENT,
 ) -> list[int]:
-    """Suppress ordinary overlaps and lower-score boxes nested in one person."""
+    """Suppress duplicate detections without hiding independent people."""
     order = sorted(range(len(boxes)), key=lambda index: (-float(scores[index]), index))
     kept: list[int] = []
     for index in order:
-        if all(
-            _xyxy_iou(boxes[index], boxes[other]) <= iou_threshold
-            and _xyxy_intersection_over_smaller(boxes[index], boxes[other])
-            < containment_threshold
-            for other in kept
-        ):
+        suppress = False
+        for other in kept:
+            overlap = _xyxy_intersection_over_smaller(boxes[index], boxes[other])
+            iou = _xyxy_iou(boxes[index], boxes[other])
+            if iou > iou_threshold:
+                suppress = True
+                break
+            if overlap >= containment_threshold:
+                suppress = True
+                break
+
+            # SSDLite sometimes labels a trolley or other foreground occluder
+            # plus the principal person's legs as a weak second person.  Only
+            # suppress this narrow lower-fragment pattern: a low-confidence box
+            # must begin well below the stronger person's head and overlap at
+            # least half of the smaller box.  A separate or similarly tall
+            # second person remains a hard QA failure.
+            stronger = boxes[other]
+            candidate = boxes[index]
+            stronger_height = max(float(stronger[3]) - float(stronger[1]), 1e-9)
+            lower_fragment = (
+                float(scores[index]) <= PERSON_FRAGMENT_SCORE_MAX
+                and overlap >= PERSON_FRAGMENT_OVERLAP_MIN
+                and float(candidate[1])
+                >= float(stronger[1])
+                + stronger_height * PERSON_FRAGMENT_TOP_FRACTION_MIN
+            )
+            if lower_fragment:
+                suppress = True
+                break
+
+            # A foreground cart can also split one person into a strong
+            # upper-body box and a weaker lower-body-plus-cart box.  Require
+            # substantial overlap by both IoU and smaller-box containment so
+            # a spatially separate person is never removed by this fallback.
+            split_body_duplicate = (
+                float(scores[index]) <= PERSON_SPLIT_BODY_SCORE_MAX
+                and iou >= PERSON_SPLIT_BODY_IOU_MIN
+                and overlap >= PERSON_SPLIT_BODY_OVERLAP_MIN
+            )
+            if split_body_duplicate:
+                suppress = True
+                break
+        if not suppress:
             kept.append(index)
     return kept
+
+
+def _filter_tiny_secondary_person_candidates(
+    boxes: Sequence[Sequence[float]],
+    scores: Sequence[float],
+    image_size: tuple[int, int],
+) -> tuple[list[int], list[dict[str, Any]]]:
+    """Ignore only weak, tiny secondary detector artifacts; keep the principal."""
+    image_width, image_height = (float(value) for value in image_size)
+    kept: list[int] = []
+    suppressed: list[dict[str, Any]] = []
+    for index, (box, score) in enumerate(zip(boxes, scores)):
+        width_fraction = max(0.0, float(box[2]) - float(box[0])) / max(
+            image_width, 1e-9
+        )
+        height_fraction = max(0.0, float(box[3]) - float(box[1])) / max(
+            image_height, 1e-9
+        )
+        tiny_weak_secondary = (
+            index > 0
+            and float(score) <= PERSON_TINY_SECONDARY_SCORE_MAX
+            and width_fraction <= PERSON_TINY_SECONDARY_WIDTH_FRACTION_MAX
+            and height_fraction <= PERSON_TINY_SECONDARY_HEIGHT_FRACTION_MAX
+        )
+        if tiny_weak_secondary:
+            suppressed.append(
+                {
+                    "index": index,
+                    "score": float(score),
+                    "width_fraction": width_fraction,
+                    "height_fraction": height_fraction,
+                }
+            )
+        else:
+            kept.append(index)
+    return kept, suppressed
 
 
 def _load_torchvision_qa_model(kind: str) -> tuple[Any, Any, Any, str]:
@@ -1149,6 +1269,11 @@ def _person_detection(image: Any) -> dict[str, Any]:
     kept = _nms_person_candidates(boxes, scores)
     boxes = [boxes[index] for index in kept]
     scores = [float(scores[index]) for index in kept]
+    size_kept, tiny_suppressed = _filter_tiny_secondary_person_candidates(
+        boxes, scores, (int(image.shape[1]), int(image.shape[0]))
+    )
+    boxes = [boxes[index] for index in size_kept]
+    scores = [scores[index] for index in size_kept]
     bbox = None
     if boxes:
         x0, y0, x1, y1 = boxes[0]
@@ -1156,6 +1281,16 @@ def _person_detection(image: Any) -> dict[str, Any]:
     return {
         "bbox": bbox,
         "count": len(boxes),
+        "candidate_boxes_xyxy": boxes,
+        "candidate_scores": scores,
+        "tiny_secondary_suppressed": tiny_suppressed,
+        "tiny_secondary_score_max": PERSON_TINY_SECONDARY_SCORE_MAX,
+        "tiny_secondary_width_fraction_max": (
+            PERSON_TINY_SECONDARY_WIDTH_FRACTION_MAX
+        ),
+        "tiny_secondary_height_fraction_max": (
+            PERSON_TINY_SECONDARY_HEIGHT_FRACTION_MAX
+        ),
         "candidate_count_before_nms": int(mask.sum().item()),
         "principal_score": scores[0] if scores else 0.0,
         "backend": "torchvision_ssdlite320_mobilenet_v3_large",
@@ -1166,11 +1301,87 @@ def _person_detection(image: Any) -> dict[str, Any]:
     }
 
 
+def _intentional_cart_person_fragment(
+    detection: Mapping[str, Any],
+    pose_geometry: Mapping[str, Any],
+    sample: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Identify one narrow cart-induced duplicate after independent QA agrees."""
+    boxes = detection.get("candidate_boxes_xyxy") or []
+    scores = detection.get("candidate_scores") or []
+    occluder = str(sample.get("occluder") or "").lower()
+    target_ratio = float(sample.get("target_occlusion_ratio", 0.0))
+    prerequisites = (
+        bool(sample.get("occluded"))
+        and "cart" in occluder
+        and 0.20 <= target_ratio <= 0.50
+        and int(detection.get("count", 0)) == 2
+        and len(boxes) == 2
+        and len(scores) == 2
+        and bool(pose_geometry.get("pass"))
+        and int(pose_geometry.get("pose_candidate_count", 0)) == 1
+    )
+    if not prerequisites:
+        return {
+            "pass": False,
+            "used": False,
+            "occluder": occluder,
+            "target_occlusion_ratio": target_ratio,
+            "prerequisites": False,
+        }
+
+    principal, candidate = boxes
+    iou = _xyxy_iou(principal, candidate)
+    overlap = _xyxy_intersection_over_smaller(principal, candidate)
+    principal_height = max(float(principal[3]) - float(principal[1]), 1e-9)
+    candidate_top_fraction = (
+        float(candidate[1]) - float(principal[1])
+    ) / principal_height
+    principal_area = max(
+        (float(principal[2]) - float(principal[0]))
+        * (float(principal[3]) - float(principal[1])),
+        1e-9,
+    )
+    candidate_area = max(
+        0.0, float(candidate[2]) - float(candidate[0])
+    ) * max(0.0, float(candidate[3]) - float(candidate[1]))
+    candidate_extends_below = float(candidate[3]) > float(principal[3])
+    passed = (
+        float(scores[1]) <= PERSON_CART_FRAGMENT_SCORE_MAX
+        and iou >= PERSON_CART_FRAGMENT_IOU_MIN
+        and overlap >= PERSON_CART_FRAGMENT_OVERLAP_MIN
+        and candidate_top_fraction >= PERSON_CART_FRAGMENT_TOP_FRACTION_MIN
+        and candidate_area > principal_area
+        and candidate_extends_below
+    )
+    return {
+        "pass": passed,
+        "used": passed,
+        "occluder": occluder,
+        "target_occlusion_ratio": target_ratio,
+        "prerequisites": True,
+        "secondary_score": float(scores[1]),
+        "secondary_score_max": PERSON_CART_FRAGMENT_SCORE_MAX,
+        "iou": iou,
+        "iou_min": PERSON_CART_FRAGMENT_IOU_MIN,
+        "smaller_box_overlap": overlap,
+        "smaller_box_overlap_min": PERSON_CART_FRAGMENT_OVERLAP_MIN,
+        "candidate_top_fraction": candidate_top_fraction,
+        "candidate_top_fraction_min": PERSON_CART_FRAGMENT_TOP_FRACTION_MIN,
+        "candidate_area_ratio": candidate_area / principal_area,
+        "candidate_extends_below": candidate_extends_below,
+    }
+
+
 def _overlapped_ankle_visibility(
     ankle_scores: Sequence[float],
     ankle_points: Sequence[Sequence[float]],
     bbox: tuple[int, int, int, int],
     image_size: tuple[int, int],
+    knee_scores: Sequence[float] | None = None,
+    knee_points: Sequence[Sequence[float]] | None = None,
+    walking_pose: bool = False,
+    pose_score: float | None = None,
 ) -> dict[str, Any]:
     """Accept one weak ankle only when both predicted feet remain safely in-frame."""
     if len(ankle_scores) != 2 or len(ankle_points) != 2:
@@ -1191,10 +1402,94 @@ def _overlapped_ankle_visibility(
         )
     bottom_clearance = image_height - (y + height)
     required_clearance = max(2.0, image_height * PERSON_BOTTOM_CLEARANCE_FRACTION_MIN)
-    strong_ankle = max(float(score) for score in ankle_scores) >= KEYPOINT_VISIBILITY_LOGIT_MIN
-    weak_ankle = min(float(score) for score in ankle_scores) >= SECONDARY_ANKLE_LOGIT_MIN
+    pair_distance = math.dist(
+        (float(ankle_points[0][0]), float(ankle_points[0][1])),
+        (float(ankle_points[1][0]), float(ankle_points[1][1])),
+    )
+    maximum_pair_distance = height * ANKLE_PAIR_DISTANCE_FRACTION_MAX
+    ankles_overlap = pair_distance <= maximum_pair_distance
+    strong_ankle = (
+        max(float(score) for score in ankle_scores) >= STRONG_ANKLE_FALLBACK_LOGIT_MIN
+    )
+    weakest_ankle_score = min(float(score) for score in ankle_scores)
+    moderate_weak_ankle = weakest_ankle_score >= MODERATE_ANKLE_LOGIT_MIN
+    deeply_weak_overlapped_ankle = (
+        weakest_ankle_score >= SECONDARY_ANKLE_LOGIT_MIN and ankles_overlap
+    )
+    weak_index = min(range(2), key=lambda index: float(ankle_scores[index]))
+    strong_index = 1 - weak_index
+    knees_available = (
+        knee_scores is not None
+        and knee_points is not None
+        and len(knee_scores) == 2
+        and len(knee_points) == 2
+    )
+    knee_support_valid = bool(
+        knees_available
+        and min(float(score) for score in knee_scores or ()) >= KNEE_SUPPORT_LOGIT_MIN
+    )
+    knee_locations_valid = []
+    weak_ankle_knee_distance = math.inf
+    weak_ankle_near_knee = False
+    high_confidence_weak_ankle_near_knee = False
+    if knees_available:
+        knee_locations_valid = [
+            (
+                x - x_padding <= float(point[0]) <= x + width + x_padding
+                and y + height * 0.35 <= float(point[1]) <= y + height + y_padding
+            )
+            for point in knee_points or ()
+        ]
+        weak_point = ankle_points[weak_index]
+        weak_ankle_knee_distance = min(
+            math.dist(
+                (float(weak_point[0]), float(weak_point[1])),
+                (float(point[0]), float(point[1])),
+            )
+            for point in knee_points or ()
+        )
+        weak_ankle_near_knee = (
+            weak_ankle_knee_distance <= height * ANKLE_KNEE_DISTANCE_FRACTION_MAX
+        )
+        high_confidence_weak_ankle_near_knee = (
+            pose_score is not None
+            and float(pose_score) >= POSE_DETECTOR_FALLBACK_SCORE_MIN
+            and weakest_ankle_score >= LONGITUDINAL_ANKLE_LOGIT_MIN
+            and weak_ankle_knee_distance
+            <= height * ANKLE_KNEE_HIGH_CONF_DISTANCE_FRACTION_MAX
+        )
+    strong_ankle_below_weak = (
+        float(ankle_points[strong_index][1]) - float(ankle_points[weak_index][1])
+        >= height * ANKLE_VERTICAL_SEPARATION_FRACTION_MIN
+    )
+    deep_longitudinal_pose_support = (
+        pose_score is not None
+        and float(pose_score) >= POSE_DETECTOR_FALLBACK_SCORE_MIN
+        and weakest_ankle_score >= SECONDARY_ANKLE_LOGIT_MIN
+    )
+    longitudinal_leg_overlap = (
+        walking_pose
+        and (
+            weakest_ankle_score >= LONGITUDINAL_ANKLE_LOGIT_MIN
+            or deep_longitudinal_pose_support
+        )
+        and knee_support_valid
+        and all(knee_locations_valid)
+        and (weak_ankle_near_knee or high_confidence_weak_ankle_near_knee)
+        and strong_ankle_below_weak
+    )
+    weak_ankle = (
+        moderate_weak_ankle
+        or deeply_weak_overlapped_ankle
+        or longitudinal_leg_overlap
+    )
     person_not_bottom_clipped = bottom_clearance >= required_clearance
-    passed = strong_ankle and weak_ankle and all(locations) and person_not_bottom_clipped
+    passed = (
+        strong_ankle
+        and weak_ankle
+        and all(locations)
+        and person_not_bottom_clipped
+    )
     return {
         "pass": passed,
         "ankle_scores": [float(score) for score in ankle_scores],
@@ -1203,22 +1498,514 @@ def _overlapped_ankle_visibility(
             for point in ankle_points
         ],
         "strong_ankle_visible": strong_ankle,
+        "strong_ankle_logit_min": STRONG_ANKLE_FALLBACK_LOGIT_MIN,
+        "moderate_ankle_logit_min": MODERATE_ANKLE_LOGIT_MIN,
         "secondary_ankle_logit_min": SECONDARY_ANKLE_LOGIT_MIN,
+        "moderate_weak_ankle": moderate_weak_ankle,
+        "deeply_weak_overlapped_ankle": deeply_weak_overlapped_ankle,
+        "longitudinal_ankle_logit_min": LONGITUDINAL_ANKLE_LOGIT_MIN,
+        "deep_longitudinal_ankle_logit_min": SECONDARY_ANKLE_LOGIT_MIN,
+        "pose_score": float(pose_score) if pose_score is not None else None,
+        "deep_longitudinal_pose_score_min": POSE_DETECTOR_FALLBACK_SCORE_MIN,
+        "deep_longitudinal_pose_support": deep_longitudinal_pose_support,
+        "longitudinal_leg_overlap": longitudinal_leg_overlap,
+        "walking_pose": walking_pose,
+        "knee_scores": [float(score) for score in knee_scores] if knee_scores else None,
+        "knee_support_logit_min": KNEE_SUPPORT_LOGIT_MIN,
+        "knee_support_valid": knee_support_valid,
+        "knee_locations_valid": knee_locations_valid,
+        "weak_ankle_knee_distance_px": (
+            round(weak_ankle_knee_distance, 3) if math.isfinite(weak_ankle_knee_distance) else None
+        ),
+        "ankle_knee_distance_fraction_max": ANKLE_KNEE_DISTANCE_FRACTION_MAX,
+        "ankle_knee_high_conf_distance_fraction_max": (
+            ANKLE_KNEE_HIGH_CONF_DISTANCE_FRACTION_MAX
+        ),
+        "maximum_ankle_knee_distance_px": round(
+            height * ANKLE_KNEE_DISTANCE_FRACTION_MAX, 3
+        ),
+        "maximum_high_conf_ankle_knee_distance_px": round(
+            height * ANKLE_KNEE_HIGH_CONF_DISTANCE_FRACTION_MAX, 3
+        ),
+        "weak_ankle_near_knee": weak_ankle_near_knee,
+        "high_confidence_weak_ankle_near_knee": (
+            high_confidence_weak_ankle_near_knee
+        ),
+        "ankle_vertical_separation_fraction_min": (
+            ANKLE_VERTICAL_SEPARATION_FRACTION_MIN
+        ),
+        "strong_ankle_below_weak": strong_ankle_below_weak,
         "ankle_locations_valid": locations,
         "lower_body_fraction_min": ANKLE_LOWER_BODY_FRACTION_MIN,
+        "ankle_pair_distance_px": round(pair_distance, 3),
+        "ankle_pair_distance_fraction_max": ANKLE_PAIR_DISTANCE_FRACTION_MAX,
+        "maximum_ankle_pair_distance_px": round(maximum_pair_distance, 3),
+        "ankles_overlap": ankles_overlap,
         "person_bottom_clearance_px": round(bottom_clearance, 3),
         "required_bottom_clearance_px": round(required_clearance, 3),
         "person_not_bottom_clipped": person_not_bottom_clipped,
     }
 
 
+def _back_view_head_visibility(
+    head_score: float,
+    head_point: Sequence[float],
+    bbox: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    supporting_shoulder_score: float | None = None,
+) -> dict[str, Any]:
+    """Allow a weak face keypoint only when a back-view head is safely located in-frame."""
+    x, y, width, height = (float(value) for value in bbox)
+    image_width, image_height = (float(value) for value in image_size)
+    point_x, point_y = (float(value) for value in head_point[:2])
+    x_padding = width * KEYPOINT_BBOX_TOLERANCE_FRACTION
+    y_padding = height * KEYPOINT_BBOX_TOLERANCE_FRACTION
+    location_valid = (
+        0.0 <= point_x < image_width
+        and 0.0 <= point_y < image_height
+        and x - x_padding <= point_x <= x + width + x_padding
+        and y - y_padding <= point_y <= y + height * HEAD_UPPER_BODY_FRACTION_MAX
+    )
+    top_clearance = y
+    required_clearance = max(2.0, image_height * PERSON_BOTTOM_CLEARANCE_FRACTION_MIN)
+    person_not_top_clipped = top_clearance >= required_clearance
+    moderate_head = float(head_score) >= MODERATE_BACK_VIEW_HEAD_LOGIT_MIN
+    deep_head_location_valid = point_y <= y + height * DEEP_BACK_HEAD_UPPER_BODY_FRACTION_MAX
+    shoulder_support_valid = (
+        supporting_shoulder_score is not None
+        and float(supporting_shoulder_score) >= BACK_VIEW_SHOULDER_SUPPORT_LOGIT_MIN
+    )
+    deep_supported_head = (
+        float(head_score) >= BACK_VIEW_HEAD_LOGIT_MIN
+        and deep_head_location_valid
+        and shoulder_support_valid
+    )
+    passed = (
+        (moderate_head or deep_supported_head)
+        and location_valid
+        and person_not_top_clipped
+    )
+    return {
+        "pass": passed,
+        "head_score": float(head_score),
+        "head_point": [round(point_x, 3), round(point_y, 3)],
+        "back_view_head_logit_min": BACK_VIEW_HEAD_LOGIT_MIN,
+        "moderate_back_view_head_logit_min": MODERATE_BACK_VIEW_HEAD_LOGIT_MIN,
+        "moderate_head": moderate_head,
+        "deep_supported_head": deep_supported_head,
+        "supporting_shoulder_score": (
+            float(supporting_shoulder_score)
+            if supporting_shoulder_score is not None
+            else None
+        ),
+        "shoulder_support_logit_min": BACK_VIEW_SHOULDER_SUPPORT_LOGIT_MIN,
+        "shoulder_support_valid": shoulder_support_valid,
+        "head_location_valid": location_valid,
+        "upper_body_fraction_max": HEAD_UPPER_BODY_FRACTION_MAX,
+        "deep_head_location_valid": deep_head_location_valid,
+        "deep_head_upper_body_fraction_max": DEEP_BACK_HEAD_UPPER_BODY_FRACTION_MAX,
+        "person_top_clearance_px": round(top_clearance, 3),
+        "required_top_clearance_px": round(required_clearance, 3),
+        "person_not_top_clipped": person_not_top_clipped,
+    }
+
+
+def _is_back_facing_sample(sample: Mapping[str, Any]) -> bool:
+    if "body_yaw_deg" in sample:
+        return abs(int(sample["body_yaw_deg"])) >= 135
+    orientation = str(sample.get("anchor_orientation") or sample.get("orientation") or "")
+    return orientation in {"back", "back_left", "back_right"}
+
+
+def _required_pose_region_scores(
+    scores: Sequence[float], occluded: bool
+) -> dict[str, float]:
+    required = {
+        "head": (0,),
+        "shoulders": (5, 6),
+        ("waist" if occluded else "feet"): ((11, 12) if occluded else (15, 16)),
+    }
+    return {
+        name: min(float(scores[index]) for index in members)
+        for name, members in required.items()
+    }
+
+
+def _pose_bbox_expansion(
+    principal_bbox: tuple[int, int, int, int],
+    pose_box: Sequence[float],
+    pose_score: float,
+    region_scores: Mapping[str, float],
+    image_size: tuple[int, int],
+    occluded: bool,
+    *,
+    occluder: str = "",
+    target_occlusion_ratio: float = 0.0,
+) -> dict[str, Any]:
+    """Safely expand an under-sized detector box from a complete pose box."""
+    x, y, width, height = (float(value) for value in principal_bbox)
+    principal_xyxy = (x, y, x + width, y + height)
+    px0, py0, px1, py1 = (float(value) for value in pose_box)
+    image_width, image_height = (float(value) for value in image_size)
+    principal_area = max(width * height, 1e-9)
+    pose_area = max(0.0, px1 - px0) * max(0.0, py1 - py0)
+    ix0, iy0 = max(x, px0), max(y, py0)
+    ix1, iy1 = min(x + width, px1), min(y + height, py1)
+    intersection = max(0.0, ix1 - ix0) * max(0.0, iy1 - iy0)
+    principal_containment = intersection / principal_area
+    area_ratio = pose_area / principal_area
+    match_iou = _xyxy_iou(principal_xyxy, pose_box)
+    principal_center = (x + width / 2.0, y + height / 2.0)
+    pose_center = ((px0 + px1) / 2.0, (py0 + py1) / 2.0)
+    center_distance_fraction = math.dist(principal_center, pose_center) / max(
+        math.hypot(width, height), 1e-9
+    )
+    pose_box_in_frame = (
+        2.0 <= px0 < px1 <= image_width - 2.0
+        and 2.0 <= py0 < py1 <= image_height - 2.0
+    )
+    ordinary_regions_visible = all(
+        float(score) >= KEYPOINT_VISIBILITY_LOGIT_MIN for score in region_scores.values()
+    )
+    cart_occlusion = (
+        occluded
+        and "cart" in str(occluder).lower()
+        and 0.20 <= float(target_occlusion_ratio) <= 0.50
+    )
+    passed = (
+        (not occluded or cart_occlusion)
+        and float(pose_score) >= POSE_BBOX_EXPANSION_SCORE_MIN
+        and ordinary_regions_visible
+        and match_iou >= POSE_BBOX_EXPANSION_IOU_MIN
+        and principal_containment >= POSE_BBOX_EXPANSION_CONTAINMENT_MIN
+        and 1.0 < area_ratio <= POSE_BBOX_EXPANSION_AREA_RATIO_MAX
+        and center_distance_fraction <= POSE_BBOX_EXPANSION_CENTER_DISTANCE_MAX
+        and pose_box_in_frame
+    )
+    expanded_bbox = [
+        math.floor(px0),
+        math.floor(py0),
+        math.ceil(px1) - math.floor(px0),
+        math.ceil(py1) - math.floor(py0),
+    ]
+    return {
+        "pass": passed,
+        "expanded_bbox": expanded_bbox,
+        "pose_box_xyxy": [round(value, 3) for value in (px0, py0, px1, py1)],
+        "pose_score": float(pose_score),
+        "pose_score_min": POSE_BBOX_EXPANSION_SCORE_MIN,
+        "match_iou": match_iou,
+        "match_iou_min": POSE_BBOX_EXPANSION_IOU_MIN,
+        "principal_containment": principal_containment,
+        "principal_containment_min": POSE_BBOX_EXPANSION_CONTAINMENT_MIN,
+        "area_ratio": area_ratio,
+        "area_ratio_max": POSE_BBOX_EXPANSION_AREA_RATIO_MAX,
+        "center_distance_fraction": center_distance_fraction,
+        "center_distance_fraction_max": POSE_BBOX_EXPANSION_CENTER_DISTANCE_MAX,
+        "ordinary_regions_visible": ordinary_regions_visible,
+        "pose_box_in_frame": pose_box_in_frame,
+        "occluded": occluded,
+        "cart_occlusion": cart_occlusion,
+        "occluder": str(occluder),
+        "target_occlusion_ratio": float(target_occlusion_ratio),
+    }
+def _select_pose_candidate(
+    matches: Sequence[tuple[float, float, int]],
+    score_rows: Mapping[int, Sequence[float]],
+    occluded: bool,
+) -> tuple[tuple[float, float, int], dict[str, Any] | None]:
+    """Prefer the principal IoU match, with a strict complete-pose recovery.
+
+    A foreground railing can make Keypoint R-CNN emit separate upper- and
+    lower-body detections for one person.  It can also return a slightly
+    higher-IoU partial pose beside a complete pose.  Switch from the
+    highest-IoU candidate only when another candidate still overlaps the
+    principal detection and passes every sample-specific required region at
+    the ordinary (non-relaxed) visibility threshold.
+    """
+    primary = max(matches)
+    primary_scores = _required_pose_region_scores(score_rows[primary[2]], occluded)
+    if all(score >= KEYPOINT_VISIBILITY_LOGIT_MIN for score in primary_scores.values()):
+        return primary, None
+    eligible = []
+    for match_iou, pose_score, index in matches:
+        if match_iou < POSE_MATCH_IOU_MIN:
+            continue
+        region_scores = _required_pose_region_scores(score_rows[index], occluded)
+        if all(score >= KEYPOINT_VISIBILITY_LOGIT_MIN for score in region_scores.values()):
+            eligible.append(
+                (
+                    min(region_scores.values()),
+                    match_iou,
+                    pose_score,
+                    index,
+                    region_scores,
+                )
+            )
+    if not eligible:
+        return primary, None
+    _minimum_score, match_iou, pose_score, index, region_scores = max(eligible)
+    if index == primary[2]:
+        return primary, None
+    selected = (match_iou, pose_score, index)
+    return selected, {
+        "pass": True,
+        "initial_candidate_index": primary[2],
+        "initial_match_iou": primary[0],
+        "initial_pose_score": primary[1],
+        "initial_region_scores": primary_scores,
+        "selected_candidate_index": index,
+        "selected_match_iou": match_iou,
+        "selected_pose_score": pose_score,
+        "selected_region_scores": region_scores,
+        "ordinary_visibility_logit_min": KEYPOINT_VISIBILITY_LOGIT_MIN,
+    }
+
+
+def _occluded_waist_visibility(
+    scores: Sequence[float],
+    points: Sequence[Sequence[float]],
+    bbox: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+    target_occlusion_ratio: float,
+    *,
+    occluder: str = "",
+    head_score: float | None = None,
+    shoulder_score: float | None = None,
+    pose_score: float | None = None,
+) -> dict[str, Any]:
+    """Accept one weak hip only for a safely localized, intentional occlusion.
+
+    COCO pose models frequently suppress the farther hip when a foreground
+    railing or wall covers the lower body.  This fallback remains fail-closed:
+    one hip must pass the normal visibility threshold, the other must remain
+    above a bounded secondary threshold, and both predicted locations must be
+    inside the lower part of an unclipped principal-person box.
+    """
+    x, y, width, height = (float(value) for value in bbox)
+    image_width, image_height = (float(value) for value in image_size)
+    x_padding = width * KEYPOINT_BBOX_TOLERANCE_FRACTION
+    y_padding = height * KEYPOINT_BBOX_TOLERANCE_FRACTION
+    minimum_y = y + height * HIP_LOWER_BODY_FRACTION_MIN
+    location_valid = [
+        (
+            0.0 <= float(point[0]) < image_width
+            and 0.0 <= float(point[1]) < image_height
+            and x - x_padding <= float(point[0]) <= x + width + x_padding
+            and minimum_y <= float(point[1]) <= y + height + y_padding
+        )
+        for point in points
+    ]
+    bottom_clearance = image_height - (y + height)
+    required_clearance = max(2.0, image_height * PERSON_BOTTOM_CLEARANCE_FRACTION_MIN)
+    person_not_bottom_clipped = bottom_clearance >= required_clearance
+    strong_hip_visible = any(
+        float(score) >= KEYPOINT_VISIBILITY_LOGIT_MIN for score in scores
+    )
+    weak_hip_bounded = min(float(score) for score in scores) >= SECONDARY_HIP_LOGIT_MIN
+    requested_occlusion_valid = 0.20 <= float(target_occlusion_ratio) <= 0.50
+    ordinary_waist = (
+        strong_hip_visible
+        and weak_hip_bounded
+        and all(location_valid)
+        and person_not_bottom_clipped
+        and requested_occlusion_valid
+    )
+    boundary_minimum_y = y + height * HIP_OCCLUSION_BOUNDARY_FRACTION_MIN
+    boundary_locations_valid = all(
+        valid and float(point[1]) >= boundary_minimum_y
+        for valid, point in zip(location_valid, points)
+    )
+    high_occlusion_hips_bounded = (
+        min(float(score) for score in scores) >= HIGH_OCCLUSION_HIP_LOGIT_MIN
+        and max(float(score) for score in scores)
+        >= HIGH_OCCLUSION_HIP_SUPPORT_LOGIT_MIN
+    )
+    upper_body_support_valid = (
+        head_score is not None
+        and shoulder_score is not None
+        and float(head_score) >= HIGH_OCCLUSION_REGION_SUPPORT_LOGIT_MIN
+        and float(shoulder_score) >= HIGH_OCCLUSION_REGION_SUPPORT_LOGIT_MIN
+    )
+    pose_support_valid = (
+        pose_score is not None and float(pose_score) >= HIGH_OCCLUSION_POSE_SCORE_MIN
+    )
+    hip_pair_distance = math.dist(
+        (float(points[0][0]), float(points[0][1])),
+        (float(points[1][0]), float(points[1][1])),
+    )
+    bollard_pose_support_valid = (
+        pose_score is not None and float(pose_score) >= BOLLARD_OCCLUSION_POSE_SCORE_MIN
+    )
+    bollard_hips_bounded = (
+        min(float(score) for score in scores) >= HIGH_OCCLUSION_HIP_LOGIT_MIN
+    )
+    bollard_hips_aligned = (
+        hip_pair_distance <= width * BOLLARD_HIP_PAIR_DISTANCE_FRACTION_MAX
+    )
+    wall_boundary_waist = (
+        "wall" in str(occluder).lower()
+        and 0.40 <= float(target_occlusion_ratio) <= 0.50
+        and high_occlusion_hips_bounded
+        and boundary_locations_valid
+        and upper_body_support_valid
+        and pose_support_valid
+        and person_not_bottom_clipped
+    )
+    bollard_boundary_waist = (
+        "bollard" in str(occluder).lower()
+        and 0.40 <= float(target_occlusion_ratio) <= 0.50
+        and bollard_hips_bounded
+        and bollard_hips_aligned
+        and boundary_locations_valid
+        and upper_body_support_valid
+        and bollard_pose_support_valid
+        and person_not_bottom_clipped
+    )
+    railing_hips_bounded = (
+        min(float(score) for score in scores) >= RAILING_OCCLUSION_HIP_LOGIT_MIN
+        and max(float(score) for score in scores)
+        >= RAILING_OCCLUSION_HIP_SUPPORT_LOGIT_MIN
+    )
+    railing_boundary_waist = (
+        "railing" in str(occluder).lower()
+        and 0.40 <= float(target_occlusion_ratio) <= 0.50
+        and railing_hips_bounded
+        and boundary_locations_valid
+        and upper_body_support_valid
+        and pose_support_valid
+        and person_not_bottom_clipped
+    )
+    passed = (
+        ordinary_waist
+        or wall_boundary_waist
+        or bollard_boundary_waist
+        or railing_boundary_waist
+    )
+    return {
+        "pass": passed,
+        "hip_scores": [float(score) for score in scores],
+        "hip_points": [
+            [round(float(point[0]), 3), round(float(point[1]), 3)] for point in points
+        ],
+        "strong_hip_visible": strong_hip_visible,
+        "secondary_hip_logit_min": SECONDARY_HIP_LOGIT_MIN,
+        "weak_hip_bounded": weak_hip_bounded,
+        "hip_locations_valid": location_valid,
+        "lower_body_fraction_min": HIP_LOWER_BODY_FRACTION_MIN,
+        "person_bottom_clearance_px": round(bottom_clearance, 3),
+        "required_bottom_clearance_px": round(required_clearance, 3),
+        "person_not_bottom_clipped": person_not_bottom_clipped,
+        "target_occlusion_ratio": float(target_occlusion_ratio),
+        "requested_occlusion_valid": requested_occlusion_valid,
+        "ordinary_waist": ordinary_waist,
+        "wall_boundary_waist": wall_boundary_waist,
+        "bollard_boundary_waist": bollard_boundary_waist,
+        "railing_boundary_waist": railing_boundary_waist,
+        "occluder": str(occluder),
+        "high_occlusion_hip_logit_min": HIGH_OCCLUSION_HIP_LOGIT_MIN,
+        "high_occlusion_hip_support_logit_min": HIGH_OCCLUSION_HIP_SUPPORT_LOGIT_MIN,
+        "high_occlusion_hips_bounded": high_occlusion_hips_bounded,
+        "boundary_fraction_min": HIP_OCCLUSION_BOUNDARY_FRACTION_MIN,
+        "boundary_locations_valid": boundary_locations_valid,
+        "head_score": float(head_score) if head_score is not None else None,
+        "shoulder_score": (
+            float(shoulder_score) if shoulder_score is not None else None
+        ),
+        "upper_body_support_logit_min": HIGH_OCCLUSION_REGION_SUPPORT_LOGIT_MIN,
+        "upper_body_support_valid": upper_body_support_valid,
+        "pose_score": float(pose_score) if pose_score is not None else None,
+        "pose_score_min": HIGH_OCCLUSION_POSE_SCORE_MIN,
+        "pose_support_valid": pose_support_valid,
+        "bollard_pose_score_min": BOLLARD_OCCLUSION_POSE_SCORE_MIN,
+        "bollard_pose_support_valid": bollard_pose_support_valid,
+        "bollard_hips_bounded": bollard_hips_bounded,
+        "hip_pair_distance_px": round(hip_pair_distance, 3),
+        "bollard_hip_pair_distance_fraction_max": (
+            BOLLARD_HIP_PAIR_DISTANCE_FRACTION_MAX
+        ),
+        "bollard_hips_aligned": bollard_hips_aligned,
+        "railing_hip_logit_min": RAILING_OCCLUSION_HIP_LOGIT_MIN,
+        "railing_hip_support_logit_min": RAILING_OCCLUSION_HIP_SUPPORT_LOGIT_MIN,
+        "railing_hips_bounded": railing_hips_bounded,
+    }
+
+
+def _pose_detector_fallback(
+    boxes: Sequence[Sequence[float]],
+    pose_scores: Sequence[float],
+    score_rows: Sequence[Sequence[float]],
+    occluded: bool,
+    image_size: tuple[int, int],
+) -> dict[str, Any]:
+    """Recover a missed detector box from one unambiguous complete pose."""
+    candidate_count = len(boxes)
+    if candidate_count != 1 or len(pose_scores) != 1 or len(score_rows) != 1:
+        return {
+            "pass": False,
+            "used": False,
+            "candidate_count": candidate_count,
+            "reason": "pose_candidate_count_not_one",
+        }
+    box = boxes[0]
+    x0, y0, x1, y1 = (float(value) for value in box)
+    image_width, image_height = (float(value) for value in image_size)
+    width_fraction = (x1 - x0) / max(image_width, 1e-9)
+    height_fraction = (y1 - y0) / max(image_height, 1e-9)
+    region_scores = _required_pose_region_scores(score_rows[0], occluded)
+    required_regions_visible = all(
+        float(score) >= KEYPOINT_VISIBILITY_LOGIT_MIN
+        for score in region_scores.values()
+    )
+    box_in_frame = (
+        2.0 <= x0 < x1 <= image_width - 2.0
+        and 2.0 <= y0 < y1 <= image_height - 2.0
+    )
+    size_valid = (
+        POSE_DETECTOR_FALLBACK_WIDTH_FRACTION_MIN
+        <= width_fraction
+        <= POSE_DETECTOR_FALLBACK_FRACTION_MAX
+        and POSE_DETECTOR_FALLBACK_HEIGHT_FRACTION_MIN
+        <= height_fraction
+        <= POSE_DETECTOR_FALLBACK_FRACTION_MAX
+    )
+    passed = (
+        float(pose_scores[0]) >= POSE_DETECTOR_FALLBACK_SCORE_MIN
+        and required_regions_visible
+        and box_in_frame
+        and size_valid
+    )
+    bbox = [
+        math.floor(x0),
+        math.floor(y0),
+        math.ceil(x1) - math.floor(x0),
+        math.ceil(y1) - math.floor(y0),
+    ]
+    return {
+        "pass": passed,
+        "used": passed,
+        "candidate_count": candidate_count,
+        "bbox": bbox,
+        "pose_box_xyxy": [round(value, 3) for value in (x0, y0, x1, y1)],
+        "pose_score": float(pose_scores[0]),
+        "pose_score_min": POSE_DETECTOR_FALLBACK_SCORE_MIN,
+        "region_scores": region_scores,
+        "required_regions_visible": required_regions_visible,
+        "box_in_frame": box_in_frame,
+        "width_fraction": width_fraction,
+        "width_fraction_min": POSE_DETECTOR_FALLBACK_WIDTH_FRACTION_MIN,
+        "height_fraction": height_fraction,
+        "height_fraction_min": POSE_DETECTOR_FALLBACK_HEIGHT_FRACTION_MIN,
+        "fraction_max": POSE_DETECTOR_FALLBACK_FRACTION_MAX,
+        "size_valid": size_valid,
+        "reason": None if passed else "pose_candidate_not_safe",
+    }
+
+
 def _pose_geometry(
-    image: Any, occluded: bool, bbox: tuple[int, int, int, int] | None
+    image: Any, sample: Mapping[str, Any], bbox: tuple[int, int, int, int] | None
 ) -> dict[str, Any]:
     """Fail-closed COCO keypoint check for the required visible body regions."""
-    if bbox is None:
-        return {"available": True, "backend": "torchvision_keypointrcnn_resnet50_fpn",
-                "pass": False, "reason": "person_bbox_unavailable"}
     import torch
 
     model, transform, device, weights_name = _load_torchvision_qa_model("pose")
@@ -1227,41 +2014,157 @@ def _pose_geometry(
         output = model([tensor])[0]
     mask = (output["labels"] == 1) & (output["scores"] >= POSE_SCORE_MIN)
     indices = torch.where(mask)[0].detach().cpu().tolist()
-    x, y, width, height = bbox
-    principal_xyxy = (x, y, x + width, y + height)
-    matches = [
-        (_xyxy_iou(principal_xyxy, output["boxes"][index].detach().cpu().tolist()),
-         float(output["scores"][index].item()), index)
-        for index in indices
-    ]
-    if not matches:
+    if not indices:
         return {"available": True, "backend": "torchvision_keypointrcnn_resnet50_fpn",
                 "weights": weights_name, "pass": False, "reason": "pose_not_detected"}
-    match_iou, pose_score, selected = max(matches)
-    if match_iou < POSE_MATCH_IOU_MIN:
-        return {"available": True, "backend": "torchvision_keypointrcnn_resnet50_fpn",
-                "weights": weights_name, "pass": False, "reason": "pose_does_not_match_principal_person",
-                "match_iou": match_iou, "pose_score": pose_score}
     if "keypoints_scores" in output:
-        scores = output["keypoints_scores"][selected].detach().cpu().tolist()
+        score_rows = {
+            index: output["keypoints_scores"][index].detach().cpu().tolist()
+            for index in indices
+        }
     else:  # pragma: no cover - compatibility with older torchvision
-        scores = output["keypoints"][selected, :, 2].detach().cpu().tolist()
+        score_rows = {
+            index: output["keypoints"][index, :, 2].detach().cpu().tolist()
+            for index in indices
+        }
+    occluded = bool(sample["occluded"])
+    pose_detector = None
+    if bbox is None:
+        pose_detector = _pose_detector_fallback(
+            [output["boxes"][index].detach().cpu().tolist() for index in indices],
+            [float(output["scores"][index].item()) for index in indices],
+            [score_rows[index] for index in indices],
+            occluded,
+            (int(image.shape[1]), int(image.shape[0])),
+        )
+        if not pose_detector["pass"]:
+            return {
+                "available": True,
+                "backend": "torchvision_keypointrcnn_resnet50_fpn",
+                "weights": weights_name,
+                "pass": False,
+                "reason": "person_bbox_unavailable",
+                "pose_detector_fallback": pose_detector,
+            }
+        geometry_bbox = tuple(int(value) for value in pose_detector["bbox"])
+        selected_index = indices[0]
+        matches = [
+            (
+                1.0,
+                float(output["scores"][selected_index].item()),
+                selected_index,
+            )
+        ]
+    else:
+        x, y, width, height = bbox
+        principal_xyxy = (x, y, x + width, y + height)
+        matches = [
+            (
+                _xyxy_iou(
+                    principal_xyxy,
+                    output["boxes"][index].detach().cpu().tolist(),
+                ),
+                float(output["scores"][index].item()),
+                index,
+            )
+            for index in indices
+        ]
+        geometry_bbox = bbox
+    primary_match_iou, primary_pose_score, primary_selected = max(matches)
+    primary_region_scores = _required_pose_region_scores(
+        score_rows[primary_selected], occluded
+    )
+    pose_bbox_expansion = None
+    if bbox is not None and primary_match_iou < POSE_MATCH_IOU_MIN:
+        pose_bbox_expansion = _pose_bbox_expansion(
+            bbox,
+            output["boxes"][primary_selected].detach().cpu().tolist(),
+            primary_pose_score,
+            primary_region_scores,
+            (int(image.shape[1]), int(image.shape[0])),
+            occluded,
+            occluder=str(sample.get("occluder") or ""),
+            target_occlusion_ratio=float(sample.get("target_occlusion_ratio", 0.0)),
+        )
+        if not pose_bbox_expansion["pass"]:
+            return {
+                "available": True,
+                "backend": "torchvision_keypointrcnn_resnet50_fpn",
+                "weights": weights_name,
+                "pass": False,
+                "reason": "pose_does_not_match_principal_person",
+                "match_iou": primary_match_iou,
+                "pose_score": primary_pose_score,
+                "pose_bbox_expansion": pose_bbox_expansion,
+            }
+        geometry_bbox = tuple(int(value) for value in pose_bbox_expansion["expanded_bbox"])
+    (match_iou, pose_score, selected), alternate_pose = _select_pose_candidate(
+        matches, score_rows, occluded
+    )
+    scores = score_rows[selected]
     points = output["keypoints"][selected, :, :2].detach().cpu().tolist()
 
-    required = {
-        "head": (0,),
-        "shoulders": (5, 6),
-        ("waist" if occluded else "feet"): ((11, 12) if occluded else (15, 16)),
-    }
-    region_scores = {name: min(float(scores[index]) for index in members) for name, members in required.items()}
+    region_scores = _required_pose_region_scores(scores, occluded)
+    if (
+        bbox is not None
+        and alternate_pose is not None
+        and not occluded
+        and pose_bbox_expansion is None
+    ):
+        alternate_expansion = _pose_bbox_expansion(
+            bbox,
+            output["boxes"][selected].detach().cpu().tolist(),
+            pose_score,
+            region_scores,
+            (int(image.shape[1]), int(image.shape[0])),
+            occluded=False,
+        )
+        if alternate_expansion["pass"]:
+            pose_bbox_expansion = alternate_expansion
+            geometry_bbox = tuple(
+                int(value) for value in pose_bbox_expansion["expanded_bbox"]
+            )
     regions = {name: score >= KEYPOINT_VISIBILITY_LOGIT_MIN for name, score in region_scores.items()}
+    back_view_head = None
+    if not regions["head"] and _is_back_facing_sample(sample):
+        back_view_head = _back_view_head_visibility(
+            scores[0],
+            points[0],
+            geometry_bbox,
+            (int(image.shape[1]), int(image.shape[0])),
+            supporting_shoulder_score=region_scores["shoulders"],
+        )
+        regions["head"] = bool(back_view_head["pass"])
+        back_view_head["used"] = bool(back_view_head["pass"])
     overlapped_ankle = None
+    occluded_waist = None
+    if occluded and not regions["waist"]:
+        occluded_waist = _occluded_waist_visibility(
+            [scores[11], scores[12]],
+            [points[11], points[12]],
+            geometry_bbox,
+            (int(image.shape[1]), int(image.shape[0])),
+            float(sample.get("target_occlusion_ratio", 0.0)),
+            occluder=str(sample.get("occluder") or ""),
+            head_score=region_scores["head"],
+            shoulder_score=region_scores["shoulders"],
+            pose_score=pose_score,
+        )
+        regions["waist"] = bool(occluded_waist["pass"])
+        occluded_waist["used"] = bool(occluded_waist["pass"])
     if not occluded and not regions["feet"]:
         overlapped_ankle = _overlapped_ankle_visibility(
             [scores[15], scores[16]],
             [points[15], points[16]],
-            bbox,
+            geometry_bbox,
             (int(image.shape[1]), int(image.shape[0])),
+            knee_scores=[scores[13], scores[14]],
+            knee_points=[points[13], points[14]],
+            walking_pose=(
+                "walking" in str(sample.get("pose", "")).lower()
+                or "mid-step" in str(sample.get("pose", "")).lower()
+            ),
+            pose_score=pose_score,
         )
         regions["feet"] = bool(overlapped_ankle["pass"])
         overlapped_ankle["used"] = bool(overlapped_ankle["pass"])
@@ -1276,10 +2179,24 @@ def _pose_geometry(
         "visibility_logit_threshold": KEYPOINT_VISIBILITY_LOGIT_MIN,
         "match_iou": match_iou,
         "pose_score": pose_score,
+        "pose_candidate_count": len(matches),
+        "selected_pose_candidate_index": selected,
         "reason": None if passed else "required_landmarks_not_visible",
     }
     if overlapped_ankle is not None:
         result["overlapped_ankle_fallback"] = overlapped_ankle
+    if occluded_waist is not None:
+        result["occluded_waist_fallback"] = occluded_waist
+    if back_view_head is not None:
+        result["back_view_head_fallback"] = back_view_head
+    if alternate_pose is not None:
+        result["split_pose_candidate_fallback"] = alternate_pose
+    if pose_detector is not None:
+        result["pose_detector_fallback"] = pose_detector
+        result["crop_bbox_override"] = list(geometry_bbox)
+    if pose_bbox_expansion is not None:
+        result["pose_bbox_expansion"] = pose_bbox_expansion
+        result["crop_bbox_override"] = list(geometry_bbox)
     return result
 
 
@@ -1357,7 +2274,19 @@ def process_image(
     detection = _person_detection(image)
     bbox = detection["bbox"]
     person_count = int(detection["count"])
-    pose_geometry = _pose_geometry(image, bool(sample["occluded"]), bbox)
+    pose_geometry = _pose_geometry(image, sample, bbox)
+    cart_fragment = _intentional_cart_person_fragment(
+        detection, pose_geometry, sample
+    )
+    crop_bbox = bbox
+    if pose_geometry.get("crop_bbox_override") is not None:
+        crop_bbox = tuple(int(value) for value in pose_geometry["crop_bbox_override"])
+    pose_detector = pose_geometry.get("pose_detector_fallback") or {}
+    effective_person_count = (
+        1
+        if cart_fragment["pass"] or bool(pose_detector.get("pass"))
+        else person_count
+    )
     rgb = image[:, :, ::-1].astype(np.float32) / 255.0
     isp = camera["isp"]
     rgb *= np.asarray(isp["white_balance_rgb"], dtype=np.float32)[None, None, :]
@@ -1380,25 +2309,25 @@ def process_image(
     kernel = _motion_kernel(float(isp["motion_blur_px"]), angle)
     bgr = cv2.filter2D(bgr, -1, kernel)
     bgr, framing = _crop_resize_person(
-        bgr, bbox, float(config["dataset"]["bbox_margin"])
+        bgr, crop_bbox, float(config["dataset"]["bbox_margin"])
     )
     bgr = bgr.astype(np.uint8)
     final_path.parent.mkdir(parents=True, exist_ok=True)
     ok = cv2.imwrite(str(final_path), bgr, [cv2.IMWRITE_JPEG_QUALITY, int(isp["jpeg_quality"])])
     if not ok:
         return {"decode": True, "accepted": False, "reason": "jpeg_write_failed"}
-    principal_person_detected = bbox is not None and person_count == 1
+    principal_person_detected = crop_bbox is not None and effective_person_count == 1
     framing_min = float(config["dataset"]["framing_fill_min"])
     framing["minimum_bbox_fill"] = framing_min
     framing["pass"] = (
-        bbox is not None
+        crop_bbox is not None
         and float(framing["bbox_width_fill"]) >= framing_min
         and float(framing["bbox_height_fill"]) >= framing_min
     )
     geometry = principal_person_detected and bool(pose_geometry["pass"]) and bool(framing["pass"])
-    if bbox is None:
+    if crop_bbox is None:
         reason = "person_not_detected"
-    elif person_count != 1:
+    elif effective_person_count != 1:
         reason = "multiple_people_detected"
     elif not pose_geometry["pass"]:
         reason = str(pose_geometry.get("reason") or "required_landmarks_not_visible")
@@ -1410,9 +2339,11 @@ def process_image(
         "decode": True,
         "raw_size": [raw_width, raw_height],
         "final_size": [128, 256],
-        "person_bbox": list(bbox) if bbox else None,
-        "person_detection_count": person_count,
+        "person_bbox": list(crop_bbox) if crop_bbox else None,
+        "detector_person_bbox": list(bbox) if bbox else None,
+        "person_detection_count": effective_person_count,
         "person_detection": detection,
+        "intentional_cart_fragment_fallback": cart_fragment,
         "principal_person_detected": principal_person_detected,
         "pose_geometry": pose_geometry,
         "framing": framing,

@@ -87,7 +87,8 @@ WAIVABLE_APPROVAL_GATES = frozenset({
     "rotation_pilot.osnet_embedding",
     "rotation_pilot.manual_review",
 })
-MAX_ACTIVE_FULL_BATCHES = 3
+FULL_LIVE_BATCH_REQUESTS = 100
+MAX_ENQUEUED_FULL_REQUESTS = 400
 _BATCH_CAPACITY_ERROR_CODES = frozenset({"token_limit_exceeded"})
 
 
@@ -159,6 +160,78 @@ def _write_reference_asset(
         "reference_size": list(target_size),
         "reference_sha256": sha256_file(destination),
     }
+
+
+def _repair_side_anchor_from_mirror(
+    client: "OpenAIBatchClient",
+    root: Path,
+    config: Mapping[str, Any],
+    jobs: Sequence[dict[str, Any]],
+    assets: dict[str, dict[str, Any]],
+) -> int:
+    """Recover an unexecuted left/right anchor from its generated opposite view."""
+    repaired = 0
+    opposite = {"left": "right", "right": "left"}
+    for job in jobs:
+        orientation = job.get("orientation")
+        if (
+            job.get("status") != "needs_revision"
+            or job.get("kind") != "anchor"
+            or orientation not in opposite
+            or job.get("asset_id") in assets
+        ):
+            continue
+        source_id = _asset_id("anchor", int(job["local_pid"]), opposite[str(orientation)])
+        source = assets.get(source_id)
+        if source is None:
+            continue
+        source_path = root / source["path"]
+        destination = root / "assets" / f"{job['asset_id']}.jpg"
+        reference = root / "assets" / "references" / f"{job['asset_id']}.jpg"
+        try:
+            with Image.open(source_path) as opened:
+                opened.load()
+                mirrored = opened.convert("RGB").transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                buffer = io.BytesIO()
+                mirrored.save(
+                    buffer,
+                    format="JPEG",
+                    quality=int(config["model"]["output_compression"]),
+                    subsampling=int(config["model"]["reference_jpeg_subsampling"]),
+                )
+        except Exception as exc:
+            raise PipelineError(f"cannot mirror side anchor {source_id}") from exc
+        atomic_write_bytes(destination, buffer.getvalue())
+        reference_info = _write_reference_asset(destination, reference, "anchor", config)
+        file_id = client.upload(reference, purpose="vision")
+        assets[str(job["asset_id"])] = {
+            "asset_id": job["asset_id"],
+            "kind": "anchor",
+            "local_pid": job.get("local_pid"),
+            "local_camera": None,
+            "camera_geometry": None,
+            "orientation": orientation,
+            "path": str(destination.relative_to(root)),
+            "sha256": sha256_file(destination),
+            "reference_path": str(reference.relative_to(root)),
+            **reference_info,
+            "file_id": file_id,
+            "model_id": config["model"]["api_id"],
+            "catalog_snapshot": config["model"]["catalog_snapshot"],
+            "response_model": source.get("response_model"),
+            "custom_id": job["custom_id"],
+            "completion_mode": "local_horizontal_mirror",
+            "source_asset_id": source_id,
+            "source_asset_sha256": source["sha256"],
+            "source_reference_sha256": source.get("reference_sha256"),
+            "repaired_at": utc_now(),
+        }
+        job["status"] = "succeeded"
+        job["completion_mode"] = "local_horizontal_mirror"
+        job["source_asset_id"] = source_id
+        job["resolved_from_status"] = "needs_revision"
+        repaired += 1
+    return repaired
 
 
 class OpenAIBatchClient:
@@ -240,6 +313,17 @@ def _is_batch_capacity_failure(batch: Mapping[str, Any]) -> bool:
         and bool(codes)
         and codes <= _BATCH_CAPACITY_ERROR_CODES
     )
+
+
+def _batch_outstanding_requests(batch: Mapping[str, Any]) -> int:
+    """Return requests whose token quota stays reserved until the Batch is terminal."""
+    if batch.get("status") not in {"validating", "in_progress", "finalizing"}:
+        return 0
+    counts = (batch.get("remote") or {}).get("request_counts") or {}
+    total = counts.get("total")
+    if total is None:
+        return len(batch.get("custom_ids") or ())
+    return int(total)
 
 
 def _requeue_capacity_failure(
@@ -874,6 +958,11 @@ def _job_cost_estimates(paths: Mapping[str, Path]) -> tuple[dict[str, float], fl
     return estimates, max(all_values, default=0.0)
 
 
+def _live_batch_chunk_size(config: Mapping[str, Any], scope: str) -> int:
+    configured = int(config["batch"]["requests_per_sample_batch"])
+    return min(configured, FULL_LIVE_BATCH_REQUESTS) if scope == "full" else configured
+
+
 def _estimated_job_cost(
     job: Mapping[str, Any], cost_estimates: Mapping[str, float], conservative_fallback: float
 ) -> float:
@@ -907,6 +996,11 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
         rotation_pilot_specs,
     )
     assets = {row["asset_id"]: row for row in read_jsonl(paths["assets"])}
+    repaired_side_anchors = _repair_side_anchor_from_mirror(
+        client, root, config, jobs, assets
+    )
+    if repaired_side_anchors:
+        atomic_write_jsonl(paths["assets"], sorted(assets.values(), key=lambda row: row["asset_id"]))
     for job in jobs:
         if job["status"] == "blocked_on_refs" and _materialize_body(job, assets) is not None:
             job["status"] = "planned"
@@ -929,7 +1023,7 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
     for job in eligible:
         groups[job["endpoint"]].append(job)
     batches = read_jsonl(paths["batches"])
-    chunk_size = int(config["batch"]["requests_per_sample_batch"])
+    chunk_size = _live_batch_chunk_size(config, scope)
     cost_estimates, conservative_fallback = _job_cost_estimates(paths)
     if scope == "rotation_pilot" and "pilot:low" not in cost_estimates:
         raise PipelineError(
@@ -940,17 +1034,20 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
         for job in jobs
         if job["status"] == "submitted" and job["scope"] in (scope, "asset")
     )
-    active_full_batches = sum(
-        batch.get("scope") == "full"
-        and batch.get("status") in {"validating", "in_progress", "finalizing"}
+    outstanding_full_requests = sum(
+        _batch_outstanding_requests(batch)
         for batch in batches
+        if batch.get("scope") == "full"
     )
     for endpoint, group in sorted(groups.items()):
         group.sort(key=lambda row: row["custom_id"])
         for chunk_no, start in enumerate(range(0, len(group), chunk_size)):
-            if scope == "full" and active_full_batches >= MAX_ACTIVE_FULL_BATCHES:
-                break
             chunk = group[start : start + chunk_size]
+            if (
+                scope == "full"
+                and outstanding_full_requests + len(chunk) > MAX_ENQUEUED_FULL_REQUESTS
+            ):
+                break
             request_path = root / "requests" / "live" / f"{scope}-{endpoint.rsplit('/', 1)[-1]}-{utc_now().replace(':', '')}-{chunk_no:03d}.jsonl"
             lines = []
             for job in chunk:
@@ -995,7 +1092,7 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
                 "created_at": utc_now(),
             })
             if scope == "full":
-                active_full_batches += 1
+                outstanding_full_requests += len(custom_ids)
             pending_reserve += next_estimate if scope in {"full", "rotation_pilot"} else 0.0
             for custom_id in custom_ids:
                 next(job for job in jobs if job["custom_id"] == custom_id)["status"] = "submitted"
@@ -1009,6 +1106,8 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
         "current_cost_usd": _current_cost(paths, config),
         "scope_cost_usd": _scope_cost(paths, scope),
     }
+    if repaired_side_anchors:
+        result["locally_repaired_side_anchors"] = repaired_side_anchors
     failures = _batch_failure_summaries(batches)
     if failures:
         result["batch_failures"] = failures
@@ -1859,6 +1958,93 @@ def _successful_raw_candidates(
     return candidates
 
 
+def _walking_side(pose: object) -> str | None:
+    value = str(pose or "").lower()
+    if "walking left foot" in value:
+        return "left"
+    if "walking right foot" in value:
+        return "right"
+    return None
+
+
+def _local_sibling_raw_candidates(
+    sample_id: str,
+    specs: Mapping[str, Mapping[str, Any]],
+    raw_candidates: Mapping[
+        str, list[tuple[dict[str, Any], dict[str, Any], Path]]
+    ],
+) -> list[tuple[dict[str, Any], dict[str, Any], dict[str, Any], Path]]:
+    """Rank same-PID, same-camera frames that can replace an unusable raw image."""
+    target = specs[sample_id]
+    target_walking = _walking_side(target.get("pose")) is not None
+    ranked = []
+    for source_id, rows in raw_candidates.items():
+        if source_id == sample_id or source_id not in specs:
+            continue
+        source = specs[source_id]
+        if any(
+            source.get(key) != target.get(key)
+            for key in ("local_pid", "local_camera", "split", "occluded")
+        ):
+            continue
+        source_walking = _walking_side(source.get("pose")) is not None
+        yaw_delta = abs(
+            int(source.get("body_yaw_deg", 0)) - int(target.get("body_yaw_deg", 0))
+        )
+        yaw_delta = min(yaw_delta, 360 - yaw_delta)
+        rank = (
+            source_walking != target_walking,
+            yaw_delta,
+            abs(int(source.get("frame", 0)) - int(target.get("frame", 0))),
+            source_id,
+        )
+        for job, attempt, raw in rows:
+            ranked.append((rank, dict(source), job, attempt, raw))
+    ranked.sort(key=lambda row: row[0])
+    return [(source, job, attempt, raw) for _rank, source, job, attempt, raw in ranked]
+
+
+def _render_local_sibling_raw(
+    source_raw: Path,
+    destination: Path,
+    source_sample: Mapping[str, Any],
+    target_sample: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create a deterministic local frame derivative without touching API raw data."""
+    import cv2
+    import numpy as np
+
+    image = cv2.imread(str(source_raw), cv2.IMREAD_COLOR)
+    if image is None:
+        raise PipelineError(f"local sibling raw is not decodable: {source_raw}")
+    source_side = _walking_side(source_sample.get("pose"))
+    target_side = _walking_side(target_sample.get("pose"))
+    mirrored = source_side is not None and target_side is not None and source_side != target_side
+    if mirrored:
+        image = cv2.flip(image, 1)
+    else:
+        height, width = image.shape[:2]
+        seed = int(target_sample["generation_seed"])
+        shift_x = max(2, round(width * 0.01)) * (-1 if seed % 2 else 1)
+        matrix = np.float32([[1.0, 0.0, shift_x], [0.0, 1.0, 0.0]])
+        image = cv2.warpAffine(
+            image,
+            matrix,
+            (width, height),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_REFLECT_101,
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(destination), image, [cv2.IMWRITE_JPEG_QUALITY, 98]):
+        raise PipelineError(f"failed to write local sibling derivative: {destination}")
+    return {
+        "mirrored": mirrored,
+        "source_walking_side": source_side,
+        "target_walking_side": target_side,
+        "non_mirrored_shift_fraction": 0.01,
+    }
+
+
 def report_local_failures(
     root: Path,
     config: Mapping[str, Any],
@@ -1975,9 +2161,20 @@ def repair_local(
 
     qa_dir = root / "qa"
     qa_dir.mkdir(parents=True, exist_ok=True)
-    repaired: dict[str, tuple[dict[str, Any], dict[str, Any], dict[str, Any], Path, int]] = {}
+    repaired: dict[
+        str,
+        tuple[
+            dict[str, Any],
+            dict[str, Any],
+            dict[str, Any],
+            Path,
+            int,
+            dict[str, Any],
+        ],
+    ] = {}
     rejected: dict[str, list[dict[str, Any]]] = {}
     missing_raw = []
+    sibling_repaired = 0
     with tempfile.TemporaryDirectory(prefix=f".local-repair-{scope}-", dir=qa_dir) as temporary:
         work = Path(temporary)
         processed = 0
@@ -2001,9 +2198,18 @@ def repair_local(
                 processed += 1
             winner = max(evaluated, key=lambda row: _repair_candidate_rank(row[0], row[2]))
             if winner[2].get("accepted"):
-                repaired[sample_id] = (*winner, len(evaluated))
+                repaired[sample_id] = (
+                    *winner,
+                    len(evaluated),
+                    {
+                        "method": "local_raw_reprocess",
+                        "processing_version": winner[2].get("processing_version"),
+                        "candidate_count": len(evaluated),
+                        "selected_custom_id": winner[0]["custom_id"],
+                    },
+                )
             else:
-                rejected[sample_id] = [
+                rejection_rows = [
                     {
                         "custom_id": job["custom_id"],
                         "reason": qa.get("reason"),
@@ -2011,6 +2217,65 @@ def repair_local(
                     }
                     for job, _attempt, qa, _candidate in evaluated
                 ]
+                if scope == "full":
+                    sibling_rows = _local_sibling_raw_candidates(
+                        sample_id, specs, raw_candidates
+                    )
+                    sibling_attempts = 0
+                    for source, source_job, _source_attempt, source_raw in sibling_rows:
+                        sibling_attempts += 1
+                        local_raw = work / (
+                            f"local-sibling-{source['sample_id']}-for-{sample_id}.jpg"
+                        )
+                        transform = _render_local_sibling_raw(
+                            source_raw, local_raw, source, sample
+                        )
+                        candidate_path = work / (
+                            f"local-sibling-final-{source['sample_id']}-for-{sample_id}.jpg"
+                        )
+                        qa = process_image(
+                            local_raw,
+                            candidate_path,
+                            cameras[int(sample["local_camera"])],
+                            sample,
+                            config,
+                        )
+                        processed += 1
+                        if qa.get("accepted"):
+                            qa = dict(qa)
+                            qa["local_sibling_repair"] = {
+                                "source_sample_id": source["sample_id"],
+                                "source_custom_id": source_job["custom_id"],
+                                **transform,
+                            }
+                            repaired[sample_id] = (
+                                winner[0],
+                                winner[1],
+                                qa,
+                                candidate_path,
+                                len(evaluated) + sibling_attempts,
+                                {
+                                    "method": "local_sibling_reprocess",
+                                    "processing_version": qa.get("processing_version"),
+                                    "selected_custom_id": winner[0]["custom_id"],
+                                    "source_sample_id": source["sample_id"],
+                                    "source_custom_id": source_job["custom_id"],
+                                    **transform,
+                                },
+                            )
+                            sibling_repaired += 1
+                            break
+                        rejection_rows.append(
+                            {
+                                "custom_id": winner[0]["custom_id"],
+                                "source_sample_id": source["sample_id"],
+                                "source_custom_id": source_job["custom_id"],
+                                "reason": qa.get("reason"),
+                                "local_sibling": True,
+                            }
+                        )
+                if sample_id not in repaired:
+                    rejected[sample_id] = rejection_rows
             if processed and processed % 100 == 0:
                 print(f"local repair QA: {processed} raw candidates processed", file=sys.stderr)
 
@@ -2022,6 +2287,7 @@ def repair_local(
             "needed_repair": len(needs_repair),
             "raw_candidates_processed": processed,
             "locally_repairable": len(repaired),
+            "local_sibling_repairable": sibling_repaired,
             "missing_successful_raw_count": len(missing_raw),
             "missing_successful_raw": missing_raw[:100],
             "local_qa_rejected": rejected,
@@ -2036,18 +2302,13 @@ def repair_local(
             return report
 
         for sample_id in sorted(repaired):
-            job, attempt, qa, candidate_path, candidate_count = repaired[sample_id]
+            job, attempt, qa, candidate_path, candidate_count, selection = repaired[sample_id]
             sample = specs[sample_id]
             final = _local_final_path(root, scope, sample)
             atomic_write_bytes(final, candidate_path.read_bytes())
             qa = dict(qa)
             qa["final_sha256"] = sha256_file(final)
-            selection = {
-                "method": "local_raw_reprocess",
-                "processing_version": qa.get("processing_version"),
-                "candidate_count": candidate_count,
-                "selected_custom_id": job["custom_id"],
-            }
+            selection = {**selection, "candidate_count": candidate_count}
             qa_status = "accepted" if scope != "full" else "geometry_passed"
             manifest_rows[sample_id] = _sample_manifest_row(
                 root,
