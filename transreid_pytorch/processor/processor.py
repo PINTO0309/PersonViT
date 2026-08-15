@@ -128,6 +128,10 @@ def do_train(cfg,
                                         cfg.DISTILL.TEMPERATURE)
         teacher.to(local_rank)
         teacher.eval()
+        # loss-only projector for cross-dimension embedding KD (may be None);
+        # fetch through the DDP wrapper if one was applied above
+        embed_proj = getattr(model.module if hasattr(model, 'module') else model,
+                             'embed_proj', None)
 
     cam_proxy_criterion = None
     if cfg.CAMPROXY.ENABLED:
@@ -194,7 +198,8 @@ def do_train(cfg,
                 if distill_criterion is not None:
                     teacher_score, teacher_feat = teacher(img, cam_label=target_cam,
                                                           view_label=target_view)
-                    distill_loss = distill_criterion(score, feat, teacher_score, teacher_feat)
+                    distill_loss = distill_criterion(score, feat, teacher_score,
+                                                     teacher_feat, projector=embed_proj)
                     distill_meter.update(distill_loss.item(), img.shape[0])
                     loss = loss + distill_loss
                 if cam_proxy_criterion is not None:

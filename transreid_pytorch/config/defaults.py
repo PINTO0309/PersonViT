@@ -170,8 +170,12 @@ _C.DISTILL.LOGIT_WEIGHT = 1.0
 # similarity-preserving relational loss on batch cosine-similarity matrices;
 # dimension-agnostic, works for any student backbone
 _C.DISTILL.REL_WEIGHT = 30.0
-# direct cosine embedding loss; requires matching embedding dims (off by default)
+# direct cosine embedding loss; off by default. With EMBED_PROJ_DIM 0 it
+# requires matching embedding dims; set EMBED_PROJ_DIM to the teacher's
+# dim (e.g. 768 for ViT-B) to train a loss-only linear projector on the
+# student instead (FitNets-style hint; dropped at export)
 _C.DISTILL.EMBED_WEIGHT = 0.0
+_C.DISTILL.EMBED_PROJ_DIM = 0
 _C.DISTILL.TEMPERATURE = 4.0
 
 # ---------------------------------------------------------------------------- #

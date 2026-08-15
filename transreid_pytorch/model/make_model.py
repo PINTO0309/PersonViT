@@ -240,6 +240,18 @@ class build_transformer(nn.Module):
 
         self.dropout = nn.Dropout(self.dropout_rate)
 
+        # loss-only projector for cross-dimension embedding KD: maps the
+        # student embedding into the teacher's space (DISTILL.EMBED_PROJ_DIM).
+        # Living on the model puts its parameters into the optimizer and the
+        # checkpoint/resume flow; it is NOT part of forward(), so inference,
+        # eval and ONNX export are unaffected (later warm starts just skip
+        # its keys).
+        self.embed_proj = None
+        if (cfg.DISTILL.ENABLED and cfg.DISTILL.EMBED_WEIGHT > 0
+                and cfg.DISTILL.EMBED_PROJ_DIM > 0):
+            self.embed_proj = nn.Linear(self.in_planes, cfg.DISTILL.EMBED_PROJ_DIM,
+                                        bias=False)
+
         if pretrain_choice == 'self':
             self.load_param(model_path)
 

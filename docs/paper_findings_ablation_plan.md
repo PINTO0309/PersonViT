@@ -576,10 +576,25 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   1.3e-5); folded deployment graph = plain P + 2 Pow (export contract
   needs the Pow pair before formal adoption). Watch the learned p
   (retrieval-typical ~3).
-- Queued next per the round plan: embed-KD projector arm (small code:
-  Linear 512->768 loss-only projector, cosine loss, EMBED_WEIGHT gate;
-  pair ONLY with the representable no-cam teacher), ViT-S-as-teacher TA
-  arm (config only), dual-teacher partial-L_cam rel-KD (small code).
+- **GeM — REJECTED (+0.007)**: rep_gem best 88.287 vs rep 88.280, noise
+  parity. The learned exponent moved to p = 1.416 (the gradient wanted
+  > 1) yet yielded nothing — distill-shaped features are already
+  GAP-optimal; not worth adding 2 Pow ops to the export contract
+  (parsimony, same principle as the cosce rejection). P lineage stays
+  the rep best 88.280.
+- **Embedding KD (implemented, ready — ladder step 3)**: loss-only
+  linear projector student 512 -> teacher 768 (`embed_proj` on the
+  model: joins optimizer/checkpoint, absent from forward/export),
+  cosine loss gated by DISTILL.EMBED_WEIGHT + new EMBED_PROJ_DIM;
+  DistillLoss takes `projector=`, processor passes it through (DDP-safe).
+  Config `osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed.yml`: rep arch,
+  warm start rep best 88.280 (unfolded), EMBED_WEIGHT 2.0 first probe,
+  representable no-cam teacher ONLY (L_cam pairing forbidden — 0.77
+  floor pressure). Expect an early Distill spike while the random
+  projector aligns. Judge vs 88.280 / 0.494.
+- Queued next per the round plan: rep rollout to N/T (proven +0.17 on
+  P), ViT-S-as-teacher TA arm (config only), dual-teacher
+  partial-L_cam rel-KD (small code).
 
 ## Measurement checklist per arm
 

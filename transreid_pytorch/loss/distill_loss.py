@@ -18,11 +18,17 @@ class DistillLoss(nn.Module):
       metric structure that retrieval actually uses, independent of the
       embedding dimensions on both sides.
     - embedding KD (optional): cosine distance between student and teacher
-      embeddings. Only valid when both embedding dimensions match, therefore
-      disabled by default.
+      embeddings. With mismatched dimensions a loss-only linear projector
+      (student -> teacher space, FitNets-style hint) must be supplied via
+      the forward `projector` argument; the projector lives on the student
+      model (`embed_proj`, built from DISTILL.EMBED_PROJ_DIM) so it joins
+      the optimizer/checkpoint flow, and is dropped at export. Unlike the
+      batch-local relational loss this transfers each sample's absolute
+      position in the teacher space.
 
-    The module is stateless (no trainable parameters), which keeps the
-    optimizer, LR schedule and checkpoint_last.pth resume format unchanged.
+    The module itself stays stateless (no trainable parameters), which keeps
+    the optimizer, LR schedule and checkpoint_last.pth resume format
+    unchanged; the projector's state belongs to the model.
     """
 
     def __init__(self, logit_weight=1.0, rel_weight=30.0, embed_weight=0.0,
@@ -33,7 +39,8 @@ class DistillLoss(nn.Module):
         self.embed_weight = embed_weight
         self.temperature = temperature
 
-    def forward(self, student_score, student_feat, teacher_score, teacher_feat):
+    def forward(self, student_score, student_feat, teacher_score, teacher_feat,
+                projector=None):
         if isinstance(student_score, list):
             student_score = student_score[0]
         if isinstance(student_feat, list):
@@ -55,13 +62,15 @@ class DistillLoss(nn.Module):
             loss = loss + self.rel_weight * rel
 
         if self.embed_weight > 0:
-            if student_feat.shape[1] != teacher_feat.shape[1]:
+            embed_feat = (projector(student_feat) if projector is not None
+                          else student_feat)
+            if embed_feat.shape[1] != teacher_feat.shape[1]:
                 raise ValueError(
                     'DISTILL.EMBED_WEIGHT requires matching embedding dims, '
-                    'got student {} vs teacher {}; use the relational/logit '
-                    'losses for cross-dimension distillation'.format(
-                        student_feat.shape[1], teacher_feat.shape[1]))
-            emb = (1.0 - F.cosine_similarity(student_feat.float(),
+                    'got student {} vs teacher {}; set DISTILL.EMBED_PROJ_DIM '
+                    'to the teacher dim to train a loss-only projector'.format(
+                        embed_feat.shape[1], teacher_feat.shape[1]))
+            emb = (1.0 - F.cosine_similarity(embed_feat.float(),
                                              teacher_feat.float(), dim=1)).mean()
             loss = loss + self.embed_weight * emb
 
