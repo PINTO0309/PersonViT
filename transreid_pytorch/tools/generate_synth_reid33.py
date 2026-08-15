@@ -82,6 +82,11 @@ DEFAULT_ROOT = HERE.parent / "data" / "SyntheticReID33"
 ASSET_ORIENTATIONS = ("front", "left", "right", "back")
 FORECAST_KEY = "forecast_total_usd_with_configured_retry_reserve"
 REFERENCE_PROCESSING_VERSION = "synth-reid33-reference-native-quarter-v1"
+WAIVABLE_APPROVAL_GATES = frozenset({
+    "pilot.osnet_embedding",
+    "rotation_pilot.osnet_embedding",
+    "rotation_pilot.manual_review",
+})
 
 
 class PipelineError(RuntimeError):
@@ -2195,6 +2200,33 @@ def command_qa(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
         run_full_embedding_qa(args.root, config, args.config.resolve())
 
 
+def _approval_failed_gates(
+    report: Mapping[str, Any], rotation_report: Mapping[str, Any]
+) -> list[str]:
+    pilot_gates = report.get("gates") or {}
+    rotation_gates = rotation_report.get("gates") or {}
+    failed = [
+        f"pilot.{name}"
+        for name, passed in pilot_gates.items()
+        if name != "body_rotation_pilot" and not passed
+    ]
+    rotation_failed = [
+        f"rotation_pilot.{name}"
+        for name, passed in rotation_gates.items()
+        if not passed
+    ]
+    failed.extend(rotation_failed)
+    if not pilot_gates and not report.get("pilot_gate_passed"):
+        failed.append("pilot.unreported_gate_state")
+    if (
+        pilot_gates.get("body_rotation_pilot") is False
+        and not rotation_failed
+        and not rotation_report.get("rotation_gate_passed")
+    ):
+        failed.append("pilot.body_rotation_pilot")
+    return sorted(set(failed))
+
+
 def command_approve(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
     paths = initialize(args.root, config)
     if not paths["report"].exists():
@@ -2207,9 +2239,42 @@ def command_approve(args: argparse.Namespace, config: Mapping[str, Any]) -> None
         raise PipelineError(
             f"forecast ${selected_forecast:.2f} exceeds requested ceiling ${args.max_usd:.2f}"
         )
-    payload = approval_payload(report, args.quality, args.max_usd, config)
+    rotation_path = paths["rotation_pilot_report"]
+    rotation_report = (
+        json.loads(rotation_path.read_text(encoding="utf-8"))
+        if rotation_path.exists()
+        else {}
+    )
+    failed_gates = _approval_failed_gates(report, rotation_report)
+    waived_gates: list[str] = []
+    waiver_reason = None
+    if failed_gates:
+        if not args.waive_failed_gates:
+            raise PipelineError(
+                "pilot approval gates failed: " + ", ".join(failed_gates)
+            )
+        nonwaivable = sorted(set(failed_gates) - WAIVABLE_APPROVAL_GATES)
+        if nonwaivable:
+            raise PipelineError(
+                "refusing to waive safety-critical gates: " + ", ".join(nonwaivable)
+            )
+        if not str(args.waiver_reason or "").strip():
+            raise PipelineError("--waiver-reason is required with --waive-failed-gates")
+        waived_gates = failed_gates
+        waiver_reason = str(args.waiver_reason)
+    elif args.waive_failed_gates:
+        raise PipelineError("no failed gates exist; waiver is unnecessary")
+    payload = approval_payload(
+        report,
+        args.quality,
+        args.max_usd,
+        config,
+        waived_gates=waived_gates,
+        waiver_reason=waiver_reason,
+    )
     atomic_write_json(paths["approval"], payload)
-    print(f"approved {args.quality} with hard ceiling ${args.max_usd:.2f}")
+    suffix = f"; waived {', '.join(waived_gates)}" if waived_gates else ""
+    print(f"approved {args.quality} with hard ceiling ${args.max_usd:.2f}{suffix}")
 
 
 def command_full(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
@@ -2263,6 +2328,15 @@ def build_parser() -> argparse.ArgumentParser:
     approve = sub.add_parser("approve", help="sign the pilot report and set the full-run ceiling")
     approve.add_argument("--quality", required=True, choices=("low",))
     approve.add_argument("--max-usd", required=True, type=float)
+    approve.add_argument(
+        "--waive-failed-gates",
+        action="store_true",
+        help="waive only the explicitly allowlisted failed gates and record the waiver",
+    )
+    approve.add_argument(
+        "--waiver-reason",
+        help="required audit reason when --waive-failed-gates is used",
+    )
     full = sub.add_parser("full", help="plan or advance the approved 20,000-image run")
     full.add_argument("--dry-run", action="store_true")
     full.add_argument("--resume", action="store_true")

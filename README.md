@@ -305,6 +305,15 @@ downloads and caches the official model weights. The command refuses to change
 the pilot manifest while a Batch is active or completed but not yet collected;
 run `pilot --resume` once more in that case. `--dry-run` verifies complete
 recoverability without changing final images, manifests, jobs, or attempts.
+Person NMS suppresses both ordinary IoU overlaps and lower-score boxes with at
+least 85% containment, preventing a single pedestrian's nested upper-body box
+from being counted as a second person.
+For a clean image with one ankle weakened by a natural walking overlap, the
+feet gate accepts the image only when the other ankle remains strongly visible,
+the weak ankle logit is at least -2.0, both predicted ankle locations are in
+the lower part of the person box and inside the image, and the person box is
+clear of the image's bottom edge. Head, shoulder, and occluded-waist thresholds
+remain unchanged.
 All pilot and full samples share the same framing policy: crop the detected
 person bounding box with 5% margin, require at least 85% bbox fill on both
 axes, and directly resize that crop to 128x256 like the real ReID inputs.
@@ -367,6 +376,22 @@ python tools/generate_synth_reid33.py full --resume
 # After all 20,000 geometry-valid samples are collected:
 python tools/generate_synth_reid33.py qa --scope full
 ```
+
+Normal approval remains fail-closed. If the user explicitly accepts the risk,
+only `pilot.osnet_embedding`, `rotation_pilot.osnet_embedding`, and
+`rotation_pilot.manual_review` may be waived with an audit reason. Image count,
+decode, geometry, framing, duplicate, ViT, model, configuration, and cost gates
+cannot be waived:
+
+```shell
+python tools/generate_synth_reid33.py approve \
+  --quality low --max-usd 120 \
+  --waive-failed-gates \
+  --waiver-reason "User explicitly authorized production despite the recorded OSNet and rotation manual-review gate failures."
+```
+
+The exact failed gate names, reason, timestamp, report hash, configuration hash,
+quality, and hard USD ceiling are preserved in `state/approval.json`.
 
 Each resume call polls existing Batch IDs and submits only newly unblocked
 first attempts. Results are matched by `custom_id`; automatic API retries,

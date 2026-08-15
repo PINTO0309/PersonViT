@@ -25,6 +25,8 @@ from calibrate_synth_reid33_similarity import (  # noqa: E402
 )
 from generate_synth_reid33 import (  # noqa: E402
     PipelineError,
+    WAIVABLE_APPROVAL_GATES,
+    _approval_failed_gates,
     _batch_failure_summaries,
     _merge_jobs,
     _paths,
@@ -63,6 +65,7 @@ from synth_reid33_core import (  # noqa: E402
     plate_prompt,
     _crop_resize_person,
     _nms_person_candidates,
+    _overlapped_ankle_visibility,
     process_image,
     read_jsonl,
     reconcile_batch_output,
@@ -72,6 +75,7 @@ from synth_reid33_core import (  # noqa: E402
     validate_plan,
     validate_rotation_pilot,
     validate_synthetic_manifest,
+    verify_approval,
 )
 
 
@@ -365,6 +369,54 @@ def test_person_nms_suppresses_nested_duplicate_but_keeps_independent_person():
     ]
     scores = [0.99, 0.85, 0.90]
     assert _nms_person_candidates(boxes, scores) == [0, 2]
+
+
+def test_person_nms_suppresses_low_iou_contained_box_from_real_pilot_regression():
+    boxes = [
+        [159.0302, 363.2432, 305.0127, 856.6233],
+        [144.9192, 362.2342, 285.9600, 541.8674],
+        [400.0, 300.0, 500.0, 750.0],
+    ]
+    scores = [0.9843, 0.5410, 0.90]
+
+    # The first two boxes have IoU 0.304, below ordinary NMS, but 89.5% of
+    # the smaller upper-body box is contained by the full-body detection.
+    assert _nms_person_candidates(boxes, scores) == [0, 2]
+
+
+@pytest.mark.parametrize(
+    ("scores", "points", "bbox", "expected_reason"),
+    [
+        ([-2.01, 6.0], [[150, 850], [250, 870]], (100, 100, 200, 800), "weak"),
+        ([-1.0, -0.2], [[150, 850], [250, 870]], (100, 100, 200, 800), "no_strong"),
+        ([-1.0, 6.0], [[150, 500], [250, 870]], (100, 100, 200, 800), "not_lower"),
+        ([-1.0, 6.0], [[150, 1000], [250, 1050]], (100, 350, 200, 800), "clipped"),
+    ],
+)
+def test_overlapped_ankle_fallback_rejects_unsafe_cases(
+    scores, points, bbox, expected_reason
+):
+    result = _overlapped_ankle_visibility(scores, points, bbox, (576, 1152))
+
+    assert not result["pass"], expected_reason
+
+
+@pytest.mark.parametrize(
+    ("scores", "points", "bbox"),
+    [
+        ([-1.4380, 11.1854], [[313.9, 765.3], [300.1, 789.5]], (206, 273, 199, 581)),
+        ([-0.4722, 6.7960], [[396.3, 762.8], [382.5, 772.2]], (356, 413, 110, 389)),
+    ],
+)
+def test_overlapped_ankle_fallback_accepts_visible_rotation_pilot_regressions(
+    scores, points, bbox
+):
+    result = _overlapped_ankle_visibility(scores, points, bbox, (576, 1152))
+
+    assert result["pass"]
+    assert result["strong_ankle_visible"]
+    assert result["ankle_locations_valid"] == [True, True]
+    assert result["person_not_bottom_clipped"]
 
 
 def test_person_crop_uses_five_percent_tight_box_and_direct_reid_resize():
@@ -693,6 +745,58 @@ def test_local_repair_rebuilds_from_raw_without_creating_api_attempts(
 def test_approval_requires_every_pilot_gate(config):
     with pytest.raises(ValueError, match="pilot report"):
         approval_payload({"pilot_gate_passed": False}, "low", 100.0, config)
+
+
+def test_explicit_approval_waiver_records_only_allowlisted_leaf_gates(config):
+    report = {
+        "pilot_gate_passed": False,
+        "gates": {
+            "decode": True,
+            "geometry": True,
+            "osnet_embedding": False,
+            "body_rotation_pilot": False,
+        },
+    }
+    rotation_report = {
+        "rotation_gate_passed": False,
+        "gates": {
+            "geometry": True,
+            "osnet_embedding": False,
+            "manual_review": False,
+        },
+    }
+
+    failed = _approval_failed_gates(report, rotation_report)
+
+    assert failed == [
+        "pilot.osnet_embedding",
+        "rotation_pilot.manual_review",
+        "rotation_pilot.osnet_embedding",
+    ]
+    assert set(failed) <= WAIVABLE_APPROVAL_GATES
+    payload = approval_payload(
+        report,
+        "low",
+        120.0,
+        config,
+        waived_gates=failed,
+        waiver_reason="User explicitly authorized production despite these QA gates.",
+    )
+    assert payload["max_usd"] == 120.0
+    assert payload["gate_waiver"]["waived_gates"] == failed
+    assert payload["gate_waiver"]["user_authorized"] is True
+    verify_approval(payload, config)
+
+
+def test_approval_waiver_requires_reason(config):
+    with pytest.raises(ValueError, match="waiver reason"):
+        approval_payload(
+            {"pilot_gate_passed": False},
+            "low",
+            120.0,
+            config,
+            waived_gates=["pilot.osnet_embedding"],
+        )
 
 
 def _save_image(path: Path, color: tuple[int, int, int]):

@@ -25,7 +25,7 @@ except ImportError as exc:  # pragma: no cover - exercised by CLI preflight
 
 
 SCHEMA_VERSION = "synth-reid33/v1"
-PROCESSING_VERSION = "synth-reid33-isp-v4-tight-crop-torchvision-qa"
+PROCESSING_VERSION = "synth-reid33-isp-v6-overlapped-ankle-qa"
 CAMERA_GEOMETRY_VERSION = "synth-reid33-camera-geometry-v1"
 PROMPT_VERSION = "synth-reid33-prompt-v3-eight-yaw-camera-pitch"
 SPLITS = ("train", "query", "gallery")
@@ -33,9 +33,14 @@ BODY_YAW_DEGREES = (0, 45, 90, 135, 180, -135, -90, -45)
 ANCHOR_ORIENTATIONS = {"front", "left", "right", "back"}
 PERSON_SCORE_MIN = 0.35
 PERSON_NMS_IOU = 0.35
+PERSON_NMS_CONTAINMENT = 0.85
 POSE_SCORE_MIN = 0.70
 POSE_MATCH_IOU_MIN = 0.30
 KEYPOINT_VISIBILITY_LOGIT_MIN = 0.0
+SECONDARY_ANKLE_LOGIT_MIN = -2.0
+ANKLE_LOWER_BODY_FRACTION_MIN = 0.65
+KEYPOINT_BBOX_TOLERANCE_FRACTION = 0.05
+PERSON_BOTTOM_CLEARANCE_FRACTION_MIN = 0.005
 FINAL_NAME_RE = re.compile(
     r"^p(?P<pid>\d{5})_d(?P<domain>\d{2})_c(?P<camera>\d{3})_(?P<seq>\d{6})\.jpe?g$"
 )
@@ -960,16 +965,24 @@ def aggregate_usage(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
 
 
 def approval_payload(
-    report: Mapping[str, Any], quality: str, max_usd: float, config: Mapping[str, Any]
+    report: Mapping[str, Any],
+    quality: str,
+    max_usd: float,
+    config: Mapping[str, Any],
+    waived_gates: Sequence[str] = (),
+    waiver_reason: str | None = None,
 ) -> dict[str, Any]:
     if quality != config["model"]["quality"]:
         raise ValueError("quality must be low")
     if max_usd <= 0 or not math.isfinite(max_usd):
         raise ValueError("max_usd must be a positive finite number")
-    if not report.get("pilot_gate_passed"):
+    normalized_waivers = sorted({str(gate).strip() for gate in waived_gates if str(gate).strip()})
+    if not report.get("pilot_gate_passed") and not normalized_waivers:
         raise ValueError("pilot report has not passed every automatic and manual gate")
+    if normalized_waivers and not str(waiver_reason or "").strip():
+        raise ValueError("an explicit waiver reason is required for failed pilot gates")
     report_hash = sha256_bytes(canonical_json(report))
-    return {
+    payload = {
         "schema_version": SCHEMA_VERSION,
         "approved_at": utc_now(),
         "model_id": config["model"]["api_id"],
@@ -979,6 +992,14 @@ def approval_payload(
         "report_sha256": report_hash,
         "config_sha256": config_sha256(config),
     }
+    if normalized_waivers:
+        payload["gate_waiver"] = {
+            "waived_gates": normalized_waivers,
+            "reason": str(waiver_reason).strip(),
+            "user_authorized": True,
+            "recorded_at": utc_now(),
+        }
+    return payload
 
 
 def verify_approval(approval: Mapping[str, Any], config: Mapping[str, Any]) -> None:
@@ -992,6 +1013,17 @@ def verify_approval(approval: Mapping[str, Any], config: Mapping[str, Any]) -> N
         raise ValueError("approval quality must be low")
     if float(approval.get("max_usd", 0)) <= 0:
         raise ValueError("approval has no valid cost ceiling")
+    waiver = approval.get("gate_waiver")
+    if waiver is not None:
+        if not isinstance(waiver, Mapping):
+            raise ValueError("approval gate waiver is malformed")
+        gates = waiver.get("waived_gates")
+        if not isinstance(gates, list) or not gates or not all(
+            isinstance(gate, str) and gate.strip() for gate in gates
+        ):
+            raise ValueError("approval gate waiver has no valid gate list")
+        if not str(waiver.get("reason", "")).strip() or not waiver.get("user_authorized"):
+            raise ValueError("approval gate waiver lacks explicit user authorization")
 
 
 def perceptual_hash(path: Path) -> str:
@@ -1027,14 +1059,40 @@ def _xyxy_iou(left: Sequence[float], right: Sequence[float]) -> float:
     return intersection / max(left_area + right_area - intersection, 1e-9)
 
 
+def _xyxy_intersection_over_smaller(
+    left: Sequence[float], right: Sequence[float]
+) -> float:
+    """Return intersection divided by the smaller box area for nested-box NMS."""
+    x0 = max(float(left[0]), float(right[0]))
+    y0 = max(float(left[1]), float(right[1]))
+    x1 = min(float(left[2]), float(right[2]))
+    y1 = min(float(left[3]), float(right[3]))
+    intersection = max(0.0, x1 - x0) * max(0.0, y1 - y0)
+    left_area = max(0.0, float(left[2]) - float(left[0])) * max(
+        0.0, float(left[3]) - float(left[1])
+    )
+    right_area = max(0.0, float(right[2]) - float(right[0])) * max(
+        0.0, float(right[3]) - float(right[1])
+    )
+    return intersection / max(min(left_area, right_area), 1e-9)
+
+
 def _nms_person_candidates(
-    boxes: Sequence[Sequence[float]], scores: Sequence[float], iou_threshold: float = PERSON_NMS_IOU
+    boxes: Sequence[Sequence[float]],
+    scores: Sequence[float],
+    iou_threshold: float = PERSON_NMS_IOU,
+    containment_threshold: float = PERSON_NMS_CONTAINMENT,
 ) -> list[int]:
-    """Deterministic NMS for the small set of person detections returned per image."""
+    """Suppress ordinary overlaps and lower-score boxes nested in one person."""
     order = sorted(range(len(boxes)), key=lambda index: (-float(scores[index]), index))
     kept: list[int] = []
     for index in order:
-        if all(_xyxy_iou(boxes[index], boxes[other]) <= iou_threshold for other in kept):
+        if all(
+            _xyxy_iou(boxes[index], boxes[other]) <= iou_threshold
+            and _xyxy_intersection_over_smaller(boxes[index], boxes[other])
+            < containment_threshold
+            for other in kept
+        ):
             kept.append(index)
     return kept
 
@@ -1104,6 +1162,53 @@ def _person_detection(image: Any) -> dict[str, Any]:
         "weights": weights_name,
         "score_threshold": PERSON_SCORE_MIN,
         "nms_iou_threshold": PERSON_NMS_IOU,
+        "nms_containment_threshold": PERSON_NMS_CONTAINMENT,
+    }
+
+
+def _overlapped_ankle_visibility(
+    ankle_scores: Sequence[float],
+    ankle_points: Sequence[Sequence[float]],
+    bbox: tuple[int, int, int, int],
+    image_size: tuple[int, int],
+) -> dict[str, Any]:
+    """Accept one weak ankle only when both predicted feet remain safely in-frame."""
+    if len(ankle_scores) != 2 or len(ankle_points) != 2:
+        raise ValueError("overlapped-ankle QA requires exactly two ankle keypoints")
+    x, y, width, height = (float(value) for value in bbox)
+    image_width, image_height = (float(value) for value in image_size)
+    x_padding = width * KEYPOINT_BBOX_TOLERANCE_FRACTION
+    y_padding = height * KEYPOINT_BBOX_TOLERANCE_FRACTION
+    lower_y = y + height * ANKLE_LOWER_BODY_FRACTION_MIN
+    locations = []
+    for point in ankle_points:
+        point_x, point_y = float(point[0]), float(point[1])
+        locations.append(
+            0.0 <= point_x < image_width
+            and 0.0 <= point_y < image_height
+            and x - x_padding <= point_x <= x + width + x_padding
+            and lower_y <= point_y <= y + height + y_padding
+        )
+    bottom_clearance = image_height - (y + height)
+    required_clearance = max(2.0, image_height * PERSON_BOTTOM_CLEARANCE_FRACTION_MIN)
+    strong_ankle = max(float(score) for score in ankle_scores) >= KEYPOINT_VISIBILITY_LOGIT_MIN
+    weak_ankle = min(float(score) for score in ankle_scores) >= SECONDARY_ANKLE_LOGIT_MIN
+    person_not_bottom_clipped = bottom_clearance >= required_clearance
+    passed = strong_ankle and weak_ankle and all(locations) and person_not_bottom_clipped
+    return {
+        "pass": passed,
+        "ankle_scores": [float(score) for score in ankle_scores],
+        "ankle_points": [
+            [round(float(point[0]), 3), round(float(point[1]), 3)]
+            for point in ankle_points
+        ],
+        "strong_ankle_visible": strong_ankle,
+        "secondary_ankle_logit_min": SECONDARY_ANKLE_LOGIT_MIN,
+        "ankle_locations_valid": locations,
+        "lower_body_fraction_min": ANKLE_LOWER_BODY_FRACTION_MIN,
+        "person_bottom_clearance_px": round(bottom_clearance, 3),
+        "required_bottom_clearance_px": round(required_clearance, 3),
+        "person_not_bottom_clipped": person_not_bottom_clipped,
     }
 
 
@@ -1141,6 +1246,7 @@ def _pose_geometry(
         scores = output["keypoints_scores"][selected].detach().cpu().tolist()
     else:  # pragma: no cover - compatibility with older torchvision
         scores = output["keypoints"][selected, :, 2].detach().cpu().tolist()
+    points = output["keypoints"][selected, :, :2].detach().cpu().tolist()
 
     required = {
         "head": (0,),
@@ -1149,8 +1255,18 @@ def _pose_geometry(
     }
     region_scores = {name: min(float(scores[index]) for index in members) for name, members in required.items()}
     regions = {name: score >= KEYPOINT_VISIBILITY_LOGIT_MIN for name, score in region_scores.items()}
+    overlapped_ankle = None
+    if not occluded and not regions["feet"]:
+        overlapped_ankle = _overlapped_ankle_visibility(
+            [scores[15], scores[16]],
+            [points[15], points[16]],
+            bbox,
+            (int(image.shape[1]), int(image.shape[0])),
+        )
+        regions["feet"] = bool(overlapped_ankle["pass"])
+        overlapped_ankle["used"] = bool(overlapped_ankle["pass"])
     passed = all(regions.values())
-    return {
+    result = {
         "available": True,
         "backend": "torchvision_keypointrcnn_resnet50_fpn",
         "weights": weights_name,
@@ -1162,6 +1278,9 @@ def _pose_geometry(
         "pose_score": pose_score,
         "reason": None if passed else "required_landmarks_not_visible",
     }
+    if overlapped_ankle is not None:
+        result["overlapped_ankle_fallback"] = overlapped_ankle
+    return result
 
 
 def _crop_resize_person(
