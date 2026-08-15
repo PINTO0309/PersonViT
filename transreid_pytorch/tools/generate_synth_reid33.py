@@ -1504,6 +1504,22 @@ def _publish_candidate(root: Path, row: dict[str, Any]) -> None:
     row["final_path"] = str(destination.relative_to(root))
 
 
+def _full_embedding_acceptance_models(root: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Keep waived pilot models as advisory metrics during full-dataset QA."""
+    approval_path = root / "state" / "approval.json"
+    if not approval_path.exists():
+        return ("vit", "osnet"), ()
+    approval = json.loads(approval_path.read_text(encoding="utf-8"))
+    waived = set((approval.get("gate_waiver") or {}).get("waived_gates") or ())
+    osnet_waived = {
+        "pilot.osnet_embedding",
+        "rotation_pilot.osnet_embedding",
+    }.issubset(waived)
+    if osnet_waived:
+        return ("vit",), ("osnet",)
+    return ("vit", "osnet"), ()
+
+
 def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Path) -> None:
     paths = initialize(root, config)
     rows = read_jsonl(paths["manifest"])
@@ -1577,14 +1593,17 @@ def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Pa
                     duplicate_ids.add(str(ordered[right]["sample_id"]))
 
     thresholds = config["qa"]
+    acceptance_models, advisory_models = _full_embedding_acceptance_models(root)
     rejected = []
     for row in rows:
         embeddings = row["qa"]["embedding"]
+        for key in ("vit", "osnet"):
+            embeddings[key]["acceptance_required"] = key in acceptance_models
         embedding_pass = all(
             embeddings[key]["anchor_top1"]
             and embeddings[key]["above_real_positive_p05"]
             and float(embeddings[key]["cosine_margin"]) >= float(thresholds["cosine_margin_min"])
-            for key in ("vit", "osnet")
+            for key in acceptance_models
         )
         duplicate_pass = str(row["sample_id"]) not in duplicate_ids
         row["qa"]["embedding_pass"] = embedding_pass
@@ -1656,6 +1675,8 @@ def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Pa
         "rejected": len(rejected),
         "phash_near_duplicate_rate": near_pairs / comparable_pairs if comparable_pairs else 1.0,
         "retrieval_label_qa": retrieval,
+        "embedding_acceptance_models": list(acceptance_models),
+        "embedding_advisory_models": list(advisory_models),
         "complete": len(accepted) == 20000 and not rejected,
     }
     atomic_write_json(root / "qa" / "full_report.json", full_report)

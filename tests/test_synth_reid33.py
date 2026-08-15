@@ -28,6 +28,7 @@ from generate_synth_reid33 import (  # noqa: E402
     WAIVABLE_APPROVAL_GATES,
     _approval_failed_gates,
     _batch_failure_summaries,
+    _full_embedding_acceptance_models,
     _merge_jobs,
     _paths,
     _refresh_and_collect,
@@ -797,6 +798,31 @@ def test_approval_waiver_requires_reason(config):
             config,
             waived_gates=["pilot.osnet_embedding"],
         )
+
+
+def test_full_embedding_qa_treats_explicitly_waived_osnet_as_advisory(tmp_path):
+    approval_path = tmp_path / "state" / "approval.json"
+    approval_path.parent.mkdir(parents=True)
+    approval_path.write_text(json.dumps({
+        "gate_waiver": {
+            "waived_gates": [
+                "pilot.osnet_embedding",
+                "rotation_pilot.osnet_embedding",
+            ],
+        },
+    }), encoding="utf-8")
+
+    assert _full_embedding_acceptance_models(tmp_path) == (("vit",), ("osnet",))
+
+
+def test_full_embedding_qa_requires_osnet_without_both_explicit_waivers(tmp_path):
+    approval_path = tmp_path / "state" / "approval.json"
+    approval_path.parent.mkdir(parents=True)
+    approval_path.write_text(json.dumps({
+        "gate_waiver": {"waived_gates": ["pilot.osnet_embedding"]},
+    }), encoding="utf-8")
+
+    assert _full_embedding_acceptance_models(tmp_path) == (("vit", "osnet"), ())
 
 
 def _save_image(path: Path, color: tuple[int, int, int]):
