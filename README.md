@@ -240,6 +240,118 @@ batch — without oversampling the small domains as hard as uniform sampling
 would. `DOMAIN_ALPHA 1.0` reproduces plain proportional sampling and `0.0`
 samples domains uniformly.
 
+### Optional SyntheticReID33 domain (d05)
+
+The gated generator in
+[`tools/generate_synth_reid33.py`](transreid_pytorch/tools/generate_synth_reid33.py)
+plans 500 fictional adult identities across 33 synthetic cameras. It produces
+16,000 train, 400 occluded query, and 3,600 clean gallery images only after a
+192-image pilot passes automatic and manual QA. Batch requests are locked to
+the supported `gpt-image-2` family alias, while the catalog snapshot
+`gpt-image-2-2026-04-21` is recorded separately for provenance. There is no
+automatic fallback to another model family, and the API key is read only from
+`OPENAI_API_KEY`.
+
+Install the optional dependencies and create an offline request preview first:
+
+```shell
+uv sync --extra synth
+cd transreid_pytorch
+python tools/generate_synth_reid33.py pilot --dry-run
+```
+
+The dry run writes deterministic identities, camera profiles, all 20,000
+sample specifications, and dependency-annotated Batch JSONL without making an
+API request. A live pilot is advanced by rerunning the resume command: first
+front anchors and 33 empty camera plates, then three edited identity views,
+then the low/medium pilot candidates.
+
+```shell
+export OPENAI_API_KEY=...       # never written to state or manifests
+python tools/generate_synth_reid33.py pilot --resume
+# Rerun after each asynchronous Batch stage completes.
+python tools/generate_synth_reid33.py pilot --resume
+python tools/generate_synth_reid33.py qa
+python tools/generate_synth_reid33.py report
+```
+
+Before `qa`, place the real-data cross-camera positive 5-percentile calibration
+for both ONNX models in
+`data/SyntheticReID33/qa/real_similarity_reference.json`, for example:
+
+```json
+{
+  "vit": {"cross_camera_positive_p05": 0.42},
+  "osnet": {"cross_camera_positive_p05": 0.37}
+}
+```
+
+Inspect `qa/pilot_contact_sheet.jpg`, copy
+`qa/manual_review.template.json` to `qa/manual_review.json`, record the manual
+review, and rerun `report`. Full generation remains locked unless every gate
+passes, both qualities have measured usage, the chosen forecast fits the USD
+ceiling, and the report/config hashes still match:
+
+```shell
+python tools/generate_synth_reid33.py approve --quality low --max-usd 500
+python tools/generate_synth_reid33.py full --dry-run
+python tools/generate_synth_reid33.py full --resume
+# After all 20,000 geometry-valid samples are collected:
+python tools/generate_synth_reid33.py qa --scope full
+```
+
+Each resume call polls existing Batch IDs and submits only newly unblocked or
+retryable jobs. Results are matched by `custom_id`, low-quality QA failures are
+promoted to medium, user-correctable image errors receive one neutral prompt
+revision, attempts stop at three, and no next batch is submitted if its
+conservative projected cost exceeds the approved ceiling.
+
+Full QA runs both ONNX models over all samples, records d05-only Rank-1/mAP as
+a label-quality diagnostic, rejects identity/margin/pHash failures for bounded
+replacement, and creates five contact sheets containing a PID/occlusion
+stratified 5% sample. Copy `qa/full_review.template.json` to
+`qa/full_review.json` after reviewing those sheets and every automatic boundary
+case. The standalone validator will not release the dataset without both the
+20,000-image automatic report and this manual review gate.
+
+After exactly 20,000 accepted images are present, validate and integrate them:
+
+```shell
+python tools/validate_synth_reid33.py data/SyntheticReID33
+python tools/build_unified_dataset.py --data-root data --force \
+  --synthetic-root data/SyntheticReID33
+python tools/validate_synth_reid33.py data/SyntheticReID33 \
+  --unified-root data/reid
+```
+
+The builder preserves d05's explicit split, maps its local cameras to global
+IDs 33–65, validates a temporary tree, then atomically switches it into place.
+The locked repository baseline becomes 191,560 train, 5,144 query, and 33,542
+gallery images across six domains and 66 cameras. Existing loader tuple and
+file-name formats are unchanged.
+These counts assume camera SIE is disabled, as in the current training setup;
+loading a 33-camera SIE checkpoint into the 66-camera model requires a separate
+embedding-row migration and is intentionally outside this workflow.
+
+For the final training adoption gate, export each baseline/candidate run as
+JSON with `seed`, a shared `recipe_sha256`, `real_domain_mAP` (`d00`–`d04`),
+and `occluded_mAP` (`Occluded-Duke`, `Occluded-REID`), then run:
+
+```shell
+python tools/evaluate_synth_reid33_adoption.py \
+  --baseline results/base-{1,2,3}.json \
+  --candidate results/d05-{1,2,3}.json
+```
+
+It only returns `adopt` after three matched seeds, no more than a 0.5-point
+mean real-domain mAP loss, and at least a 0.5-point mean occluded-set gain.
+
+One allocation constraint is intentionally documented in the config: exact
+605/610 images on every camera is mathematically incompatible with always
+visiting exactly two of the three cameras at each site. The minimum-deviation
+solution used here is 600 images on two cameras, 605 on 22, and 610 on nine;
+every identity still has exactly 40 images, eight cameras, and four sites.
+
 ### Environment (uv)
 
 The pipeline was updated to run on current PyTorch (torch.amp API,

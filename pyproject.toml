@@ -27,6 +27,12 @@ export = [
     "onnxsim==0.7.1",
     "onnxslim==0.1.94",
 ]
+synth = [
+    "openai>=1.109.1",
+    "Pillow>=10.4",
+    "PyYAML>=6.0.2",
+    "onnxruntime-gpu>=1.26.0",
+]
 
 [tool.uv]
 package = false

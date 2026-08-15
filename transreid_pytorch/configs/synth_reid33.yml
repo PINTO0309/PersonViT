@@ -1,0 +1,152 @@
+schema_version: synth-reid33/v1
+
+model:
+  # Batch rejects the dated snapshot ID even though it is listed in the model
+  # catalog. Use the Batch-supported family alias explicitly; this is not an
+  # automatic fallback to a different model family.
+  api_id: gpt-image-2
+  catalog_snapshot: gpt-image-2-2026-04-21
+  anchor_quality: medium
+  pilot_qualities: [low, medium]
+  output_format: jpeg
+  output_compression: 92
+  anchor_size: 1024x1536
+  # Cost-minimizing 1:2 API output; accepted samples are normalized to 128x256.
+  sample_size: 576x1152
+  # gpt-image-2 always applies high input fidelity. Do not add input_fidelity.
+
+dataset:
+  name: SyntheticReID33
+  domain_local: 0
+  domain_global: 5
+  camera_global_offset: 33
+  identities: 500
+  train_identities: 400
+  test_identities: 100
+  sites_per_identity: 4
+  cameras_per_site: 2
+  frames_per_camera: 5
+  train_occluded_per_identity: 12
+  query_per_test_identity: 4
+  expected:
+    train: 16000
+    query: 400
+    gallery: 3600
+    total: 20000
+  final_width: 128
+  final_height: 256
+  bbox_margin: 0.10
+
+allocation:
+  seed: 20260815
+  # Exact 605/610 per camera is incompatible with an invariant two-camera
+  # visit at every three-camera site. This is the unique minimum-range target:
+  # 2 cameras x 600, 22 x 605, 9 x 610 = 20,000.
+  allowed_camera_image_counts: [600, 605, 610]
+  expected_camera_count_histogram:
+    600: 2
+    605: 22
+    610: 9
+
+batch:
+  completion_window: 24h
+  identities_per_sample_batch: 10
+  requests_per_sample_batch: 400
+  max_attempts: 3
+  retry_reserve_fraction: 0.20
+
+pricing_usd_per_million_tokens:
+  # Snapshot of the official Batch price used for preflight estimates.
+  # Reports always preserve actual usage and this pricing snapshot.
+  batch:
+    text_input: 2.50
+    cached_text_input: 0.625
+    image_input: 4.00
+    cached_image_input: 1.00
+    image_output: 15.00
+
+qa:
+  decode_rate_min: 1.0
+  geometry_rate_min: 0.98
+  anchor_top1_min: 0.95
+  identity_consistency_min: 0.95
+  cosine_margin_min: 0.05
+  phash_near_duplicate_rate_max: 0.01
+  manual_sample_fraction: 0.05
+  query_occlusion_min: 0.20
+  query_occlusion_max: 0.50
+  vit_onnx: ../../onnx/personvit_vitb16_ain_unified_aug_n.onnx
+  osnet_onnx: ../../onnx/osnet_ain_x1_0_p_unified_aug_n.onnx
+  real_similarity_reference: ../data/SyntheticReID33/qa/real_similarity_reference.json
+
+prompt:
+  version: synth-reid33-prompt-v1
+  invariant_rules: >-
+    The subject is one fictional adult aged 20 or older and is not based on
+    any real person. Preserve face, body proportions, hair, clothing, shoes,
+    and carried items exactly. No readable text, logos, uniforms, watermark,
+    signage, extra people, collage, or border.
+  camera_rules: >-
+    Documentary fixed-surveillance-camera photograph, realistic ordinary
+    lighting, a single full-body pedestrian, no cinematic styling.
+
+sites:
+  - {key: station_concourse, label: station concourse, environment: indoor, lighting: mixed fluorescent and daylight}
+  - {key: underground_passage, label: underground passage, environment: indoor, lighting: cool fluorescent}
+  - {key: shopping_mall, label: shopping mall corridor, environment: indoor, lighting: warm retail ambient}
+  - {key: office_lobby, label: office lobby, environment: indoor, lighting: neutral ceiling panels}
+  - {key: indoor_parking, label: indoor parking structure, environment: indoor, lighting: sparse sodium and fluorescent}
+  - {key: station_plaza, label: station-front plaza, environment: outdoor, lighting: overcast daylight}
+  - {key: urban_sidewalk, label: urban sidewalk, environment: outdoor, lighting: afternoon daylight}
+  - {key: campus, label: university campus walkway, environment: outdoor, lighting: soft daylight}
+  - {key: park_path, label: public park path, environment: outdoor, lighting: tree-filtered daylight}
+  - {key: surface_parking, label: surface parking lot, environment: outdoor, lighting: clear daylight}
+  - {key: covered_arcade, label: covered pedestrian arcade, environment: outdoor, lighting: mixed shade and storefront spill}
+
+camera_views:
+  - key: high_wide
+    label: high-mounted wide angle
+    yaw_deg: 12
+    pitch_deg: -24
+    focal_mm: 20
+    exposure_ev: -0.10
+    gamma: 1.02
+    vignette: 0.10
+    radial_k1: -0.035
+    motion_blur_px: 0.6
+    jpeg_quality: 82
+  - key: diagonal_mid
+    label: diagonal medium distance
+    yaw_deg: 34
+    pitch_deg: -9
+    focal_mm: 38
+    exposure_ev: 0.05
+    gamma: 0.98
+    vignette: 0.06
+    radial_k1: -0.010
+    motion_blur_px: 1.0
+    jpeg_quality: 86
+  - key: tele_exit
+    label: telephoto exit view
+    yaw_deg: -18
+    pitch_deg: -3
+    focal_mm: 72
+    exposure_ev: -0.18
+    gamma: 1.04
+    vignette: 0.13
+    radial_k1: 0.008
+    motion_blur_px: 1.4
+    jpeg_quality: 80
+
+identity_attributes:
+  age_range: [20, 64]
+  presentations: [feminine, masculine, androgynous]
+  body_builds: [slender, lean, average, broad, stocky]
+  heights: [short, below-average, average, above-average, tall]
+  hair_styles: [short straight, short wavy, cropped, bob, shoulder-length straight, shoulder-length wavy, tied-back]
+  hair_colors: [black, dark brown, medium brown, auburn, gray]
+  upper_garments: [plain crew-neck shirt, plain button shirt, lightweight sweater, zip jacket, cardigan, plain hoodie]
+  lower_garments: [straight trousers, chinos, dark jeans, ankle-length skirt, loose trousers]
+  footwear: [plain walking shoes, plain sneakers, ankle boots, flat shoes]
+  carried_items: [none, unbranded backpack, unbranded shoulder bag, unbranded tote bag, plain briefcase]
+  colors: [navy, charcoal, gray, beige, olive, burgundy, muted blue, muted green, brown, off-white]
