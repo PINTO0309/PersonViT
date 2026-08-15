@@ -6,13 +6,21 @@ model:
   # automatic fallback to a different model family.
   api_id: gpt-image-2
   catalog_snapshot: gpt-image-2-2026-04-21
-  anchor_quality: medium
-  pilot_qualities: [low, medium]
+  # Every API image request, including anchors, plates, and pilots, is Low-only.
+  quality: low
   output_format: jpeg
   output_compression: 92
+  # API generation outputs remain at supported sizes. Before upload as edit
+  # inputs, preserve aspect ratio and downsample to the empirically selected
+  # native_quarter profile (75% fewer image-input tokens in the size probe).
   anchor_size: 1024x1536
   # Cost-minimizing 1:2 API output; accepted samples are normalized to 128x256.
   sample_size: 576x1152
+  reference_profile: native_quarter
+  reference_anchor_size: 256x384
+  reference_plate_size: 144x288
+  reference_jpeg_quality: 95
+  reference_jpeg_subsampling: 0
   # gpt-image-2 always applies high input fidelity. Do not add input_fidelity.
 
 dataset:
@@ -38,6 +46,22 @@ dataset:
   bbox_margin: 0.05
   framing_fill_min: 0.85
 
+body_rotation:
+  # Eight evenly sampled yaw bins. Angles are relative to the camera:
+  # 0 is front-facing and 180 is back-facing.
+  views:
+    - {degrees: 0, label: front, anchor: front, prompt: "front-facing view"}
+    - {degrees: 45, label: front_right, anchor: front, prompt: "front three-quarter view with the person's right side more visible"}
+    - {degrees: 90, label: right, anchor: right, prompt: "right-side profile view"}
+    - {degrees: 135, label: back_right, anchor: back, prompt: "back three-quarter view with the person's right side more visible"}
+    - {degrees: 180, label: back, anchor: back, prompt: "back-facing view"}
+    - {degrees: -135, label: back_left, anchor: back, prompt: "back three-quarter view with the person's left side more visible"}
+    - {degrees: -90, label: left, anchor: left, prompt: "left-side profile view"}
+    - {degrees: -45, label: front_left, anchor: front, prompt: "front three-quarter view with the person's left side more visible"}
+  pilot_identities: 12
+  pilot_samples_per_identity: 8
+  pilot_max_usd: 2.00
+
 allocation:
   seed: 20260815
   # Exact 605/610 per camera is incompatible with an invariant two-camera
@@ -53,8 +77,10 @@ batch:
   completion_window: 24h
   identities_per_sample_batch: 10
   requests_per_sample_batch: 400
-  max_attempts: 3
-  retry_reserve_fraction: 0.20
+  # One total attempt means zero automatic API retries. Failed samples are
+  # recovered from successful raw responses locally whenever possible.
+  max_attempts: 1
+  retry_reserve_fraction: 0.00
 
 pricing_usd_per_million_tokens:
   # Snapshot of the official Batch price used for preflight estimates.
@@ -76,12 +102,14 @@ qa:
   manual_sample_fraction: 0.05
   query_occlusion_min: 0.20
   query_occlusion_max: 0.50
+  body_yaw_accuracy_min: 0.90
+  camera_pitch_consistency_min: 0.95
   vit_onnx: ../../onnx/personvit_vitb16_ain_unified_aug_n.onnx
   osnet_onnx: ../../onnx/osnet_ain_x1_0_p_unified_aug_n.onnx
   real_similarity_reference: ../data/SyntheticReID33/qa/real_similarity_reference.json
 
 prompt:
-  version: synth-reid33-prompt-v1
+  version: synth-reid33-prompt-v3-eight-yaw-camera-pitch
   invariant_rules: >-
     The subject is one fictional adult aged 20 or older and is not based on
     any real person. Preserve face, body proportions, hair, clothing, shoes,
@@ -90,6 +118,15 @@ prompt:
   camera_rules: >-
     Documentary fixed-surveillance-camera photograph, realistic ordinary
     lighting, a single full-body pedestrian, no cinematic styling.
+
+camera_geometry:
+  version: synth-reid33-camera-geometry-v1
+  # pitch_deg uses the conventional signed camera pitch: negative is downward.
+  pitch_convention: negative_is_down
+  # Used only to turn focal length and pitch into a reproducible target
+  # horizon/eye-level vanishing-line position for the generation prompt.
+  sensor_height_mm: 24.0
+  horizon_fraction_range: [0.03, 0.45]
 
 sites:
   - {key: station_concourse, label: station concourse, environment: indoor, lighting: mixed fluorescent and daylight}
@@ -109,6 +146,9 @@ camera_views:
     label: high-mounted wide angle
     yaw_deg: 12
     pitch_deg: -24
+    pitch_jitter_deg: 4.0
+    mounting_height_m: 5.2
+    mounting_height_jitter_m: 0.7
     focal_mm: 20
     exposure_ev: -0.10
     gamma: 1.02
@@ -120,6 +160,9 @@ camera_views:
     label: diagonal medium distance
     yaw_deg: 34
     pitch_deg: -9
+    pitch_jitter_deg: 2.5
+    mounting_height_m: 3.2
+    mounting_height_jitter_m: 0.4
     focal_mm: 38
     exposure_ev: 0.05
     gamma: 0.98
@@ -131,6 +174,9 @@ camera_views:
     label: telephoto exit view
     yaw_deg: -18
     pitch_deg: -3
+    pitch_jitter_deg: 1.5
+    mounting_height_m: 2.6
+    mounting_height_jitter_m: 0.3
     focal_mm: 72
     exposure_ev: -0.18
     gamma: 1.04

@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Build and operate the gated SyntheticReID33 image-generation pipeline.
 
-The command never submits the 20,000-image run until a completed pilot report
-has been approved with both an image quality and a USD ceiling.
+The command never submits the 20,000-image run until a completed Low-only pilot
+report has been approved with a USD ceiling.
 
 Examples (run from ``transreid_pytorch``)::
 
     python tools/generate_synth_reid33.py pilot --dry-run
     python tools/generate_synth_reid33.py pilot --resume
     python tools/generate_synth_reid33.py report
+    python tools/generate_synth_reid33.py rotation-pilot --dry-run
+    python tools/generate_synth_reid33.py rotation-pilot --resume
+    python tools/generate_synth_reid33.py repair-local --scope rotation-pilot --dry-run
+    python tools/generate_synth_reid33.py report-failures --scope rotation-pilot
+    python tools/generate_synth_reid33.py qa --scope rotation-pilot
     python tools/generate_synth_reid33.py approve --quality low --max-usd 500
     python tools/generate_synth_reid33.py full --resume
 """
@@ -18,6 +23,7 @@ from __future__ import annotations
 import argparse
 import base64
 import gc
+import io
 import json
 import os
 import shutil
@@ -27,7 +33,10 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
+from PIL import Image
+
 from synth_reid33_core import (
+    PROCESSING_VERSION,
     SCHEMA_VERSION,
     aggregate_usage,
     allocate_identity_cameras,
@@ -46,6 +55,7 @@ from synth_reid33_core import (
     make_cameras,
     make_identities,
     make_pilot_samples,
+    make_rotation_pilot_samples,
     make_samples,
     plate_prompt,
     process_image,
@@ -61,6 +71,7 @@ from synth_reid33_core import (
     utc_now,
     validate_pilot,
     validate_plan,
+    validate_rotation_pilot,
     verify_approval,
 )
 
@@ -69,10 +80,78 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_CONFIG = HERE.parent / "configs" / "synth_reid33.yml"
 DEFAULT_ROOT = HERE.parent / "data" / "SyntheticReID33"
 ASSET_ORIENTATIONS = ("front", "left", "right", "back")
+FORECAST_KEY = "forecast_total_usd_with_configured_retry_reserve"
+REFERENCE_PROCESSING_VERSION = "synth-reid33-reference-native-quarter-v1"
 
 
 class PipelineError(RuntimeError):
     pass
+
+
+def _parse_image_size(value: str) -> tuple[int, int]:
+    try:
+        width, height = (int(part) for part in value.lower().split("x", 1))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PipelineError(f"invalid image size: {value!r}") from exc
+    if width <= 0 or height <= 0:
+        raise PipelineError(f"invalid image size: {value!r}")
+    return width, height
+
+
+def _reference_metadata(config: Mapping[str, Any]) -> dict[str, Any]:
+    model = config["model"]
+    return {
+        "profile": model["reference_profile"],
+        "anchor_size": model["reference_anchor_size"],
+        "plate_size": model["reference_plate_size"],
+        "resampling": "lanczos",
+        "jpeg_quality": int(model["reference_jpeg_quality"]),
+        "jpeg_subsampling": int(model["reference_jpeg_subsampling"]),
+        "processing_version": REFERENCE_PROCESSING_VERSION,
+    }
+
+
+def _write_reference_asset(
+    source: Path,
+    destination: Path,
+    kind: str,
+    config: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Create the exact low-resolution JPEG that will be uploaded as a reference."""
+    if kind not in {"anchor", "plate"}:
+        raise PipelineError(f"unsupported reference asset kind: {kind}")
+    model = config["model"]
+    size_key = "reference_anchor_size" if kind == "anchor" else "reference_plate_size"
+    expected_source_key = "anchor_size" if kind == "anchor" else "sample_size"
+    target_size = _parse_image_size(str(model[size_key]))
+    expected_source_size = _parse_image_size(str(model[expected_source_key]))
+    try:
+        with Image.open(source) as opened:
+            opened.load()
+            source_size = opened.size
+            if source_size != expected_source_size:
+                raise PipelineError(
+                    f"{kind} source size is {source_size}, expected {expected_source_size}: {source}"
+                )
+            resized = opened.convert("RGB").resize(target_size, Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            resized.save(
+                buffer,
+                format="JPEG",
+                quality=int(model["reference_jpeg_quality"]),
+                subsampling=int(model["reference_jpeg_subsampling"]),
+            )
+    except PipelineError:
+        raise
+    except Exception as exc:
+        raise PipelineError(f"cannot decode reference source {source}") from exc
+    atomic_write_bytes(destination, buffer.getvalue())
+    return {
+        **_reference_metadata(config),
+        "source_size": list(source_size),
+        "reference_size": list(target_size),
+        "reference_sha256": sha256_file(destination),
+    }
 
 
 class OpenAIBatchClient:
@@ -175,6 +254,7 @@ def _paths(root: Path) -> dict[str, Path]:
         "cameras": root / "state" / "cameras.jsonl",
         "samples": root / "state" / "samples.jsonl",
         "pilot_samples": root / "state" / "pilot_samples.jsonl",
+        "rotation_pilot_samples": root / "state" / "rotation_pilot_samples.jsonl",
         "plan_report": root / "state" / "plan_validation.json",
         "jobs": root / "state" / "jobs.jsonl",
         "batches": root / "state" / "batches.jsonl",
@@ -183,6 +263,8 @@ def _paths(root: Path) -> dict[str, Path]:
         "approval": root / "state" / "approval.json",
         "report": root / "pilot" / "report.json",
         "pilot_manifest": root / "pilot" / "manifest.jsonl",
+        "rotation_pilot_manifest": root / "rotation_pilot" / "manifest.jsonl",
+        "rotation_pilot_report": root / "rotation_pilot" / "report.json",
         "manifest": root / "manifest.jsonl",
     }
 
@@ -211,19 +293,32 @@ def initialize(root: Path, config: Mapping[str, Any]) -> dict[str, Path]:
         allocation, targets = allocate_identity_cameras(config)
         samples = make_samples(config, allocation)
         pilot_samples = make_pilot_samples(config, allocate_pilot_cameras(config))
+        rotation_pilot_samples = make_rotation_pilot_samples(
+            config, allocate_pilot_cameras(config)
+        )
         validation = validate_plan(config, identities, cameras, samples)
         pilot_validation = validate_pilot(pilot_samples)
-        if not validation["valid"] or not pilot_validation["valid"]:
-            raise PipelineError(f"deterministic plan failed validation: {validation} {pilot_validation}")
+        rotation_pilot_validation = validate_rotation_pilot(config, rotation_pilot_samples)
+        if not all((
+            validation["valid"],
+            pilot_validation["valid"],
+            rotation_pilot_validation["valid"],
+        )):
+            raise PipelineError(
+                "deterministic plan failed validation: "
+                f"{validation} {pilot_validation} {rotation_pilot_validation}"
+            )
         atomic_write_jsonl(paths["identities"], identities)
         atomic_write_jsonl(paths["cameras"], cameras)
         atomic_write_jsonl(paths["samples"], samples)
         atomic_write_jsonl(paths["pilot_samples"], pilot_samples)
+        atomic_write_jsonl(paths["rotation_pilot_samples"], rotation_pilot_samples)
         atomic_write_json(paths["plan_report"], {
             "schema_version": SCHEMA_VERSION,
             "created_at": utc_now(),
             "plan": validation,
             "pilot": pilot_validation,
+            "rotation_pilot": rotation_pilot_validation,
             "camera_block_targets": targets,
         })
     return paths
@@ -261,7 +356,7 @@ def _asset_jobs(
                 "prompt": identity_prompt(identities[pid], config),
                 "n": 1,
                 "size": model["anchor_size"],
-                "quality": model["anchor_quality"],
+                "quality": model["quality"],
                 "output_format": model["output_format"],
                 "output_compression": model["output_compression"],
             },
@@ -276,6 +371,7 @@ def _asset_jobs(
                 "kind": "plate",
                 "asset_id": asset_id,
                 "local_camera": camera["local_camera"],
+                "camera_geometry": camera["geometry"],
                 "attempt": 1,
                 "endpoint": "/v1/images/generations",
                 "logical_refs": [],
@@ -284,7 +380,7 @@ def _asset_jobs(
                     "prompt": plate_prompt(camera, config),
                     "n": 1,
                     "size": model["sample_size"],
-                    "quality": model["anchor_quality"],
+                    "quality": model["quality"],
                     "output_format": model["output_format"],
                     "output_compression": model["output_compression"],
                 },
@@ -310,7 +406,7 @@ def _asset_jobs(
                     "images": [{"file_id": f"ref:{front}"}],
                     "n": 1,
                     "size": model["anchor_size"],
-                    "quality": model["anchor_quality"],
+                    "quality": model["quality"],
                     "output_format": model["output_format"],
                     "output_compression": model["output_compression"],
                 },
@@ -328,11 +424,18 @@ def _sample_jobs(
     quality: str,
 ) -> list[dict[str, Any]]:
     model = config["model"]
+    configured_quality = str(model["quality"])
+    if quality != configured_quality:
+        raise PipelineError(f"sample quality must be {configured_quality}")
     jobs = []
     for sample in samples:
+        if scope != "full" and sample.get("quality") != configured_quality:
+            raise PipelineError(f"{scope} sample quality must be {configured_quality}")
         pid = int(sample["local_pid"])
         camera_id = int(sample["local_camera"])
-        anchor = _asset_id("anchor", pid, str(sample["orientation"]))
+        anchor = _asset_id(
+            "anchor", pid, str(sample.get("anchor_orientation", sample["orientation"]))
+        )
         plate = _asset_id("plate", camera_id)
         jobs.append({
             "custom_id": f"{scope}-{sample['sample_id']}-a1",
@@ -340,7 +443,7 @@ def _sample_jobs(
             "kind": "sample",
             "sample_id": sample["sample_id"],
             "attempt": 1,
-            "quality": quality if scope == "full" else sample["quality"],
+            "quality": configured_quality,
             "endpoint": "/v1/images/edits",
             "logical_refs": [anchor, plate],
             "body": {
@@ -349,7 +452,7 @@ def _sample_jobs(
                 "images": [{"file_id": f"ref:{anchor}"}, {"file_id": f"ref:{plate}"}],
                 "n": 1,
                 "size": model["sample_size"],
-                "quality": quality if scope == "full" else sample["quality"],
+                "quality": configured_quality,
                 "output_format": model["output_format"],
                 "output_compression": model["output_compression"],
             },
@@ -375,7 +478,21 @@ def plan_scope(root: Path, config: Mapping[str, Any], scope: str) -> tuple[list[
     if scope == "pilot":
         additions = _asset_jobs(config, identities, cameras, range(12), include_plates=True)
         additions += _sample_jobs(
-            config, read_jsonl(paths["pilot_samples"]), identities, cameras, "pilot", quality="low"
+            config,
+            read_jsonl(paths["pilot_samples"]),
+            identities,
+            cameras,
+            "pilot",
+            quality=str(config["model"]["quality"]),
+        )
+    elif scope == "rotation_pilot":
+        additions = _sample_jobs(
+            config,
+            read_jsonl(paths["rotation_pilot_samples"]),
+            identities,
+            cameras,
+            "rotation_pilot",
+            quality=str(config["model"]["quality"]),
         )
     elif scope == "full":
         if not paths["approval"].exists():
@@ -411,7 +528,10 @@ def write_dry_run_requests(
 ) -> list[Path]:
     request_dir = root / "requests" / "dry-run" / scope
     request_dir.mkdir(parents=True, exist_ok=True)
-    selected = [row for row in jobs if row["scope"] in (scope, "asset")]
+    for stale in request_dir.glob("*.jsonl"):
+        stale.unlink()
+    included_scopes = {scope} if scope == "rotation_pilot" else {scope, "asset"}
+    selected = [row for row in jobs if row["scope"] in included_scopes]
     groups: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
     for row in selected:
         stage = "generation" if not row["logical_refs"] else ("sample" if row["kind"] == "sample" else "views")
@@ -440,7 +560,15 @@ def _refresh_and_collect(
     assets = {row["asset_id"]: row for row in read_jsonl(paths["assets"])}
     attempts = read_jsonl(paths["attempts"])
     pilot_specs = {row["sample_id"]: row for row in read_jsonl(paths["pilot_samples"])}
+    rotation_pilot_specs = {
+        row["sample_id"]: row for row in read_jsonl(paths["rotation_pilot_samples"])
+    }
     full_specs = {row["sample_id"]: row for row in read_jsonl(paths["samples"])}
+    specs_by_scope = {
+        "pilot": pilot_specs,
+        "rotation_pilot": rotation_pilot_specs,
+        "full": full_specs,
+    }
     cameras = read_jsonl(paths["cameras"])
     changed = False
     for batch in batches:
@@ -518,15 +646,22 @@ def _refresh_and_collect(
                 raw = root / "assets" / f"{job['asset_id']}.jpg"
                 raw.parent.mkdir(parents=True, exist_ok=True)
                 atomic_write_bytes(raw, image_bytes)
-                file_id = client.upload(raw, purpose="vision")
+                reference = root / "assets" / "references" / f"{job['asset_id']}.jpg"
+                reference_info = _write_reference_asset(
+                    raw, reference, str(job["kind"]), config
+                )
+                file_id = client.upload(reference, purpose="vision")
                 assets[job["asset_id"]] = {
                     "asset_id": job["asset_id"],
                     "kind": job["kind"],
                     "local_pid": job.get("local_pid"),
                     "local_camera": job.get("local_camera"),
+                    "camera_geometry": job.get("camera_geometry"),
                     "orientation": job.get("orientation"),
                     "path": str(raw.relative_to(root)),
                     "sha256": sha256_file(raw),
+                    "reference_path": str(reference.relative_to(root)),
+                    **reference_info,
                     "file_id": file_id,
                     "model_id": config["model"]["api_id"],
                     "catalog_snapshot": config["model"]["catalog_snapshot"],
@@ -535,20 +670,32 @@ def _refresh_and_collect(
                 }
                 job["status"] = "succeeded"
             else:
-                sample = (pilot_specs if job["scope"] == "pilot" else full_specs)[job["sample_id"]]
+                sample = specs_by_scope[job["scope"]][job["sample_id"]]
                 raw = root / "raw" / job["scope"] / f"{job['custom_id']}.jpg"
                 raw.parent.mkdir(parents=True, exist_ok=True)
                 atomic_write_bytes(raw, image_bytes)
-                final = root / ("pilot/images" if job["scope"] == "pilot" else f"candidates/{sample['split']}") / f"{sample['sample_id']}.jpg"
+                if job["scope"] == "pilot":
+                    final_dir = root / "pilot" / "images"
+                    manifest_path = paths["pilot_manifest"]
+                    qa_status = "accepted"
+                elif job["scope"] == "rotation_pilot":
+                    final_dir = root / "rotation_pilot" / "images"
+                    manifest_path = paths["rotation_pilot_manifest"]
+                    qa_status = "accepted"
+                else:
+                    final_dir = root / "candidates" / str(sample["split"])
+                    manifest_path = paths["manifest"]
+                    qa_status = "geometry_passed"
+                final = final_dir / f"{sample['sample_id']}.jpg"
                 qa = process_image(raw, final, cameras[int(sample["local_camera"])], sample, config)
                 attempt_row["qa"] = qa
                 if qa["accepted"]:
                     job["status"] = "succeeded"
                     _upsert_manifest(
-                        paths["pilot_manifest"] if job["scope"] == "pilot" else paths["manifest"],
+                        manifest_path,
                         _sample_manifest_row(
                             root, config, sample, job, attempt_row, cameras, assets, qa, final,
-                            qa_status="accepted" if job["scope"] == "pilot" else "geometry_passed",
+                            qa_status=qa_status,
                         ),
                     )
                 else:
@@ -590,6 +737,7 @@ def _sample_manifest_row(
         **sample,
         "domain": "d05",
         "site": camera["site"],
+        "camera_geometry": camera["geometry"],
         "camera_isp": camera["isp"],
         "camera_processing_version": camera.get("processing_version"),
         "processing_version": qa.get("processing_version"),
@@ -597,7 +745,17 @@ def _sample_manifest_row(
         "prompt": job["body"]["prompt"],
         "prompt_sha256": sha256_bytes(job["body"]["prompt"].encode()),
         "reference_asset_ids": job["logical_refs"],
-        "reference_sha256": [assets[ref]["sha256"] for ref in job["logical_refs"]],
+        "reference_sha256": [
+            assets[ref].get("reference_sha256", assets[ref]["sha256"])
+            for ref in job["logical_refs"]
+        ],
+        "reference_source_sha256": [assets[ref]["sha256"] for ref in job["logical_refs"]],
+        "reference_profiles": [
+            assets[ref].get("profile", "legacy-original") for ref in job["logical_refs"]
+        ],
+        "reference_sizes": [
+            assets[ref].get("reference_size") for ref in job["logical_refs"]
+        ],
         "reference_file_ids": [assets[ref]["file_id"] for ref in job["logical_refs"]],
         "model_id": config["model"]["api_id"],
         "catalog_snapshot": config["model"]["catalog_snapshot"],
@@ -623,49 +781,24 @@ def _prepare_retries(
     jobs: list[dict[str, Any]], config: Mapping[str, Any], identities: Sequence[Mapping[str, Any]],
     cameras: Sequence[Mapping[str, Any]], pilot_specs: Mapping[str, Mapping[str, Any]],
     full_specs: Mapping[str, Mapping[str, Any]],
+    rotation_pilot_specs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    max_attempts = int(config["batch"]["max_attempts"])
-    existing_ids = {job["custom_id"] for job in jobs}
-    additions = []
-    for failed in jobs:
-        if failed["status"] not in {"needs_revision", "qa_failed", "retryable_failed", "expired_failed"}:
-            continue
-        if int(failed["attempt"]) >= max_attempts:
-            continue
-        # A user-correctable/moderation prompt is revised only once.
-        if failed["status"] == "needs_revision" and int(failed["attempt"]) >= 2:
-            continue
-        attempt = int(failed["attempt"]) + 1
-        custom_id = failed["custom_id"].rsplit("-a", 1)[0] + f"-a{attempt}"
-        if custom_id in existing_ids:
-            continue
-        retry = json.loads(json.dumps(failed))
-        retry["custom_id"] = custom_id
-        retry["attempt"] = attempt
-        retry["status"] = "blocked_on_refs" if retry["logical_refs"] else "planned"
-        if retry["kind"] == "sample":
-            sample = (pilot_specs if retry["scope"] == "pilot" else full_specs)[retry["sample_id"]]
-            if failed["status"] == "needs_revision":
-                retry["body"]["prompt"] = sample_prompt(
-                    sample, identities[int(sample["local_pid"])], cameras[int(sample["local_camera"])], config,
-                    neutral_revision=True,
-                )
-            if failed["body"].get("quality") == "low":
-                retry["body"]["quality"] = "medium"
-                retry["quality"] = "medium"
-        elif failed["status"] == "needs_revision":
-            retry["body"]["prompt"] = (
-                retry["body"]["prompt"]
-                + " Rephrase as a neutral ordinary adult pedestrian dataset reference with no sensitive context."
-            )
-        additions.append(retry)
-        existing_ids.add(custom_id)
-    jobs.extend(additions)
+    """Return jobs unchanged: all automatic API retry paths are fail-closed."""
+    if int(config["batch"]["max_attempts"]) != 1:
+        raise PipelineError("automatic retry planner requires batch.max_attempts=1")
     return jobs
 
 
 def _current_cost(paths: Mapping[str, Path], config: Mapping[str, Any]) -> float:
     return round(sum(float(row.get("estimated_cost_usd", 0)) for row in read_jsonl(paths["attempts"])), 8)
+
+
+def _scope_cost(paths: Mapping[str, Path], scope: str) -> float:
+    return round(sum(
+        float(row.get("estimated_cost_usd", 0))
+        for row in read_jsonl(paths["attempts"])
+        if row.get("scope") == scope
+    ), 8)
 
 
 def enforce_cost_ceiling(current_usd: float, pending_usd: float, next_usd: float, max_usd: float) -> None:
@@ -699,8 +832,19 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
     identities = read_jsonl(paths["identities"])
     cameras = read_jsonl(paths["cameras"])
     pilot_specs = {row["sample_id"]: row for row in read_jsonl(paths["pilot_samples"])}
+    rotation_pilot_specs = {
+        row["sample_id"]: row for row in read_jsonl(paths["rotation_pilot_samples"])
+    }
     full_specs = {row["sample_id"]: row for row in read_jsonl(paths["samples"])}
-    jobs = _prepare_retries(jobs, config, identities, cameras, pilot_specs, full_specs)
+    jobs = _prepare_retries(
+        jobs,
+        config,
+        identities,
+        cameras,
+        pilot_specs,
+        full_specs,
+        rotation_pilot_specs,
+    )
     assets = {row["asset_id"]: row for row in read_jsonl(paths["assets"])}
     for job in jobs:
         if job["status"] == "blocked_on_refs" and _materialize_body(job, assets) is not None:
@@ -712,12 +856,24 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
         if current >= float(approval["max_usd"]):
             atomic_write_jsonl(paths["jobs"], jobs)
             raise PipelineError(f"cost ceiling reached (${current:.2f}); no batch was submitted")
+    elif scope == "rotation_pilot":
+        current = _scope_cost(paths, scope)
+        maximum = float(config["body_rotation"]["pilot_max_usd"])
+        if current >= maximum:
+            atomic_write_jsonl(paths["jobs"], jobs)
+            raise PipelineError(
+                f"body-rotation pilot cost ceiling reached (${current:.2f}); no batch was submitted"
+            )
     groups: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for job in eligible:
         groups[job["endpoint"]].append(job)
     batches = read_jsonl(paths["batches"])
     chunk_size = int(config["batch"]["requests_per_sample_batch"])
     cost_estimates, conservative_fallback = _job_cost_estimates(paths)
+    if scope == "rotation_pilot" and "pilot:low" not in cost_estimates:
+        raise PipelineError(
+            "body-rotation pilot requires measured low-quality pilot usage before submission"
+        )
     pending_reserve = 0.0
     for endpoint, group in sorted(groups.items()):
         group.sort(key=lambda row: row["custom_id"])
@@ -732,16 +888,26 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
                 lines.append(make_batch_line(job["custom_id"], endpoint, body))
             if not lines:
                 continue
-            if scope == "full":
-                approval = json.loads(paths["approval"].read_text(encoding="utf-8"))
+            if scope in {"full", "rotation_pilot"}:
                 next_estimate = 0.0
                 for job in chunk:
-                    key = f"pilot:{job.get('quality')}" if job["kind"] == "sample" else (
-                        f"asset:{job['body'].get('quality')}"
-                    )
+                    if job["kind"] == "sample":
+                        key = f"pilot:{job.get('quality') or job['body'].get('quality')}"
+                    else:
+                        key = f"asset:{job['body'].get('quality')}"
                     next_estimate += cost_estimates.get(key, conservative_fallback)
+                maximum = (
+                    float(json.loads(paths["approval"].read_text(encoding="utf-8"))["max_usd"])
+                    if scope == "full"
+                    else float(config["body_rotation"]["pilot_max_usd"])
+                )
+                current = (
+                    _current_cost(paths, config)
+                    if scope == "full"
+                    else _scope_cost(paths, scope)
+                )
                 enforce_cost_ceiling(
-                    _current_cost(paths, config), pending_reserve, next_estimate, float(approval["max_usd"])
+                    current, pending_reserve, next_estimate, maximum
                 )
             atomic_write_jsonl(request_path, lines)
             file_id = client.upload(request_path, purpose="batch")
@@ -759,7 +925,7 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
                 "status": remote.get("status", "validating"),
                 "created_at": utc_now(),
             })
-            pending_reserve += next_estimate if scope == "full" else 0.0
+            pending_reserve += next_estimate if scope in {"full", "rotation_pilot"} else 0.0
             for custom_id in custom_ids:
                 next(job for job in jobs if job["custom_id"] == custom_id)["status"] = "submitted"
                 next(job for job in jobs if job["custom_id"] == custom_id)["batch_id"] = remote["id"]
@@ -770,6 +936,7 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
         "scope": scope,
         "job_status": pending,
         "current_cost_usd": _current_cost(paths, config),
+        "scope_cost_usd": _scope_cost(paths, scope),
     }
     failures = _batch_failure_summaries(batches)
     if failures:
@@ -780,14 +947,22 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
 def build_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     paths = initialize(root, config)
     rows = read_jsonl(paths["pilot_manifest"])
-    attempts = [row for row in read_jsonl(paths["attempts"]) if row.get("scope") in ("pilot", "asset")]
+    expected_pilot_images = len(read_jsonl(paths["pilot_samples"]))
+    plan_report = json.loads(paths["plan_report"].read_text(encoding="utf-8"))
+    all_attempts = read_jsonl(paths["attempts"])
+    attempts = [row for row in all_attempts if row.get("scope") in ("pilot", "asset")]
+    rotation_attempts = [row for row in all_attempts if row.get("scope") == "rotation_pilot"]
+    rotation_report = build_rotation_pilot_report(root, config)
     automatic = {
         "accepted_images": len(rows),
-        "expected_images": 192,
-        "decode_rate": sum(bool(row.get("qa", {}).get("decode")) for row in rows) / 192,
-        "geometry_rate": sum(bool(row.get("qa", {}).get("geometry_pass")) for row in rows) / 192,
-        "framing_rate": sum(bool(row.get("qa", {}).get("framing", {}).get("pass")) for row in rows) / 192,
+        "expected_images": expected_pilot_images,
+        "decode_rate": sum(bool(row.get("qa", {}).get("decode")) for row in rows) / expected_pilot_images,
+        "geometry_rate": sum(bool(row.get("qa", {}).get("geometry_pass")) for row in rows) / expected_pilot_images,
+        "framing_rate": sum(bool(row.get("qa", {}).get("framing", {}).get("pass")) for row in rows) / expected_pilot_images,
         "sha_unique": len({row.get("final_sha256") for row in rows}) == len(rows),
+        "camera_geometry_metadata_valid": bool(
+            plan_report.get("plan", {}).get("camera_geometry", {}).get("valid")
+        ),
     }
     near_pairs = 0
     comparable_pairs = 0
@@ -818,16 +993,19 @@ def build_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     manual = json.loads(manual_path.read_text(encoding="utf-8")) if manual_path.exists() else {
         "complete": False,
         "identity_consistency_rate": 0.0,
+        "camera_pitch_consistency_rate": 0.0,
+        "camera_geometry_failures": None,
         "major_anatomy_failures": None,
         "text_logo_watermark_failures": None,
         "query_occlusion_valid_rate": 0.0,
     }
     thresholds = config["qa"]
     gates = {
-        "image_count": len(rows) == 192,
+        "image_count": len(rows) == expected_pilot_images,
         "decode": automatic["decode_rate"] >= float(thresholds["decode_rate_min"]),
         "geometry": automatic["geometry_rate"] >= float(thresholds["geometry_rate_min"]),
         "framing": automatic["framing_rate"] >= float(thresholds["geometry_rate_min"]),
+        "camera_geometry_metadata": automatic["camera_geometry_metadata_valid"],
         "unique_sha": automatic["sha_unique"],
         "phash_duplicates": automatic["phash_near_duplicate_rate"]
         < float(thresholds["phash_near_duplicate_rate_max"]),
@@ -841,10 +1019,16 @@ def build_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
         and float(manual.get("identity_consistency_rate", 0)) >= float(thresholds["identity_consistency_min"])
         and int(manual.get("major_anatomy_failures") or 0) == 0
         and int(manual.get("text_logo_watermark_failures") or 0) == 0
-        and float(manual.get("query_occlusion_valid_rate", 0)) >= 0.98,
+        and float(manual.get("query_occlusion_valid_rate", 0)) >= 0.98
+        and float(manual.get("camera_pitch_consistency_rate", 0))
+        >= float(thresholds["camera_pitch_consistency_min"])
+        and int(manual.get("camera_geometry_failures") or 0) == 0,
+        "body_rotation_pilot": bool(rotation_report.get("rotation_gate_passed")),
     }
     usage = aggregate_usage(row.get("usage", {}) for row in attempts)
     actual_cost = usage_cost_usd(usage, config)
+    rotation_usage = aggregate_usage(row.get("usage", {}) for row in rotation_attempts)
+    rotation_actual_cost = usage_cost_usd(rotation_usage, config)
     costs_by_quality: dict[str, list[float]] = defaultdict(list)
     for row in attempts:
         if row.get("scope") == "pilot" and row.get("classification") == "succeeded":
@@ -857,13 +1041,15 @@ def build_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     asset_costs = [float(row.get("estimated_cost_usd", 0)) for row in successful_asset_attempts]
     successful_assets = {row.get("asset_id") for row in successful_asset_attempts}
     per_asset = sum(asset_costs) / len(asset_costs) if asset_costs else None
-    for quality in config["model"]["pilot_qualities"]:
+    for quality in (str(config["model"]["quality"]),):
         observed = costs_by_quality.get(quality, [])
         if observed and per_asset is not None:
             sample_cost = sum(observed) / len(observed)
             remaining_assets = per_asset * max(0, (500 * 4 + 33) - len(successful_assets))
             full_samples = sample_cost * 20000 * (1 + float(config["batch"]["retry_reserve_fraction"]))
-            forecast[quality] = round(actual_cost + remaining_assets + full_samples, 2)
+            forecast[quality] = round(
+                actual_cost + rotation_actual_cost + remaining_assets + full_samples, 2
+            )
         else:
             forecast[quality] = None
     report = {
@@ -871,6 +1057,7 @@ def build_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
         "created_at": utc_now(),
         "model_id": config["model"]["api_id"],
         "catalog_snapshot": config["model"]["catalog_snapshot"],
+        "reference_inputs": _reference_metadata(config),
         "config_sha256": config_sha256(config),
         "automatic": automatic,
         "manual": manual,
@@ -878,7 +1065,12 @@ def build_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
         "pilot_gate_passed": all(gates.values()),
         "usage": usage,
         "pilot_actual_cost_usd": actual_cost,
-        "forecast_total_usd_including_20pct_retry": forecast,
+        "body_rotation_pilot": {
+            "gate_passed": rotation_report["rotation_gate_passed"],
+            "actual_cost_usd": rotation_actual_cost,
+            "report_path": str(paths["rotation_pilot_report"].relative_to(root)),
+        },
+        FORECAST_KEY: forecast,
         "pricing_snapshot": config["pricing_usd_per_million_tokens"],
     }
     atomic_write_json(paths["report"], report)
@@ -934,7 +1126,11 @@ def _write_contact_sheet(
         raise PipelineError("Pillow is required for the pilot contact sheet") from exc
     thumb_w, thumb_h, label_h = 96, 192, 24
     columns = 8
-    ordered = sorted(rows, key=lambda row: (row["quality"], row["local_pid"], row["local_camera"]))
+    ordered = sorted(rows, key=lambda row: (
+        row["quality"],
+        row["local_pid"],
+        row.get("body_yaw_deg", row["local_camera"]),
+    ))
     sheet = Image.new("RGB", (columns * thumb_w, ((len(ordered) + columns - 1) // columns) * (thumb_h + label_h)), "white")
     draw = ImageDraw.Draw(sheet)
     for index, row in enumerate(ordered):
@@ -943,23 +1139,77 @@ def _write_contact_sheet(
         x = (index % columns) * thumb_w + (thumb_w - image.width) // 2
         y = (index // columns) * (thumb_h + label_h)
         sheet.paste(image, (x, y))
-        draw.text((index % columns * thumb_w + 2, y + thumb_h + 3),
-                  f"{row['quality'][0]} p{row['local_pid']:02d} c{row['local_camera']:02d}", fill="black")
+        pitch_down = float(row.get("camera_geometry", {}).get("pitch_down_deg", 0))
+        if "body_yaw_deg" in row:
+            label = (
+                f"p{row['local_pid']:02d} y{int(row['body_yaw_deg']):+04d} "
+                f"c{int(row['local_camera']):02d} d{pitch_down:.0f}"
+            )
+        else:
+            label = (
+                f"{row['quality'][0]} p{row['local_pid']:02d} "
+                f"c{int(row['local_camera']):02d} d{pitch_down:.0f}"
+            )
+        draw.text((index % columns * thumb_w + 2, y + thumb_h + 3), label, fill="black")
     path = root / "qa" / filename
     path.parent.mkdir(parents=True, exist_ok=True)
     sheet.save(path, quality=90)
     return path
 
 
-def run_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Path) -> None:
-    paths = initialize(root, config)
-    rows = read_jsonl(paths["pilot_manifest"])
-    if len(rows) != 192:
-        raise PipelineError(f"embedding QA requires 192 accepted pilot images; found {len(rows)}")
+def _write_camera_plate_contact_sheet(root: Path) -> Path:
+    """Render all 33 uncropped plates with their fixed pose metadata for manual QA."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError as exc:
+        raise PipelineError("Pillow is required for the camera plate contact sheet") from exc
+    paths = _paths(root)
+    assets = {row["asset_id"]: row for row in read_jsonl(paths["assets"])}
+    cameras = read_jsonl(paths["cameras"])
+    thumb_w, thumb_h, label_h = 192, 384, 34
+    columns = 6
+    rows = (len(cameras) + columns - 1) // columns
+    sheet = Image.new("RGB", (columns * thumb_w, rows * (thumb_h + label_h)), "white")
+    draw = ImageDraw.Draw(sheet)
+    for index, camera in enumerate(cameras):
+        camera_id = int(camera["local_camera"])
+        asset = assets.get(_asset_id("plate", camera_id))
+        if asset is None:
+            raise PipelineError(f"missing camera plate asset for camera {camera_id}")
+        plate_path = root / str(asset["path"])
+        with Image.open(plate_path) as source:
+            image = source.convert("RGB")
+            image.thumbnail((thumb_w, thumb_h))
+        cell_x = (index % columns) * thumb_w
+        cell_y = (index // columns) * (thumb_h + label_h)
+        x = cell_x + (thumb_w - image.width) // 2
+        y = cell_y + (thumb_h - image.height) // 2
+        sheet.paste(image, (x, y))
+        geometry = camera["geometry"]
+        horizon = round(float(geometry["horizon_y_fraction"]) * 100)
+        label = (
+            f"c{camera_id:02d} down {float(geometry['pitch_down_deg']):.1f}deg "
+            f"h {float(geometry['mounting_height_m']):.1f}m y {horizon}%"
+        )
+        draw.text((cell_x + 3, cell_y + thumb_h + 4), label, fill="black")
+    path = root / "qa" / "camera_pitch_contact_sheet.jpg"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sheet.save(path, quality=90)
+    return path
+
+
+def _apply_anchor_embedding_qa(
+    root: Path,
+    config: Mapping[str, Any],
+    config_path: Path,
+    rows: list[dict[str, Any]],
+    identity_count: int,
+) -> list[dict[str, Any]]:
+    paths = _paths(root)
     assets = {row["asset_id"]: row for row in read_jsonl(paths["assets"])}
     anchor_paths: list[Path] = []
     anchor_pids: list[int] = []
-    for pid in range(12):
+    for pid in range(identity_count):
         for orientation in ASSET_ORIENTATIONS:
             asset_id = _asset_id("anchor", pid, orientation)
             if asset_id not in assets:
@@ -972,14 +1222,19 @@ def run_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Path) -
     except ImportError as exc:
         raise PipelineError("numpy is required for embedding QA") from exc
     calibration_path = (config_path.parent / config["qa"]["real_similarity_reference"]).resolve()
-    calibration = json.loads(calibration_path.read_text(encoding="utf-8")) if calibration_path.exists() else {}
+    calibration = (
+        json.loads(calibration_path.read_text(encoding="utf-8"))
+        if calibration_path.exists()
+        else {}
+    )
+    anchor_pid_array = np.asarray(anchor_pids)
     for model_key, key in (("vit", "vit_onnx"), ("osnet", "osnet_onnx")):
         model_path = (config_path.parent / config["qa"][key]).resolve()
         anchor_vectors = _onnx_embeddings(model_path, anchor_paths)
         candidate_vectors = _onnx_embeddings(model_path, candidate_paths)
         centroids = []
-        for pid in range(12):
-            centroid = anchor_vectors[np.asarray(anchor_pids) == pid].mean(axis=0)
+        for pid in range(identity_count):
+            centroid = anchor_vectors[anchor_pid_array == pid].mean(axis=0)
             centroid /= max(float(np.linalg.norm(centroid)), 1e-12)
             centroids.append(centroid)
         centroids = np.stack(centroids)
@@ -997,22 +1252,197 @@ def run_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Path) -
                 "above_real_positive_p05": p05 is not None and own >= float(p05),
                 "model_sha256": sha256_file(model_path),
             }
+    return rows
+
+
+def run_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Path) -> None:
+    paths = initialize(root, config)
+    rows = read_jsonl(paths["pilot_manifest"])
+    expected = len(read_jsonl(paths["pilot_samples"]))
+    if len(rows) != expected:
+        raise PipelineError(
+            f"embedding QA requires {expected} accepted Low pilot images; found {len(rows)}"
+        )
+    rows = _apply_anchor_embedding_qa(root, config, config_path, rows, identity_count=12)
     for row in rows:
         row.setdefault("qa", {})["phash"] = row.get("qa", {}).get("phash") or perceptual_hash(root / row["final_path"])
     atomic_write_jsonl(paths["pilot_manifest"], rows)
     contact_sheet = _write_contact_sheet(root, rows)
+    camera_sheet = _write_camera_plate_contact_sheet(root)
     template = root / "qa" / "manual_review.template.json"
     if not template.exists():
         atomic_write_json(template, {
             "complete": False,
             "reviewed_contact_sheet": str(contact_sheet.relative_to(root)),
+            "reviewed_camera_plate_contact_sheet": str(camera_sheet.relative_to(root)),
             "identity_consistency_rate": 0.0,
             "major_anatomy_failures": 0,
             "text_logo_watermark_failures": 0,
             "query_occlusion_valid_rate": 0.0,
-            "reviewer_notes": "Copy to manual_review.json only after completing the stratified review.",
+            "camera_pitch_consistency_rate": 0.0,
+            "camera_geometry_failures": 0,
+            "reviewer_notes": (
+                "Copy to manual_review.json only after reviewing both the person sheet and all "
+                "33 uncropped camera plates against their labeled pitch, height, and horizon."
+            ),
         })
-    print(f"embedding QA complete; review {contact_sheet}")
+    print(f"embedding QA complete; review {contact_sheet} and {camera_sheet}")
+
+
+def build_rotation_pilot_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
+    paths = initialize(root, config)
+    rows = read_jsonl(paths["rotation_pilot_manifest"])
+    expected = int(config["body_rotation"]["pilot_identities"]) * int(
+        config["body_rotation"]["pilot_samples_per_identity"]
+    )
+    plan_validation = validate_rotation_pilot(config, rows)
+    automatic = {
+        "accepted_images": len(rows),
+        "expected_images": expected,
+        "decode_rate": sum(bool(row.get("qa", {}).get("decode")) for row in rows) / expected,
+        "geometry_rate": sum(
+            bool(row.get("qa", {}).get("geometry_pass")) for row in rows
+        ) / expected,
+        "framing_rate": sum(
+            bool(row.get("qa", {}).get("framing", {}).get("pass")) for row in rows
+        ) / expected,
+        "sha_unique": len({row.get("final_sha256") for row in rows}) == len(rows),
+        "planned_yaw_distribution_valid": plan_validation["valid"],
+        "body_yaw_counts": plan_validation["body_yaw_counts"],
+    }
+    comparable_pairs = 0
+    near_pairs = 0
+    by_pid: dict[int, list[str]] = defaultdict(list)
+    for row in rows:
+        value = row.get("qa", {}).get("phash")
+        if value:
+            by_pid[int(row["local_pid"])].append(str(value))
+    for hashes in by_pid.values():
+        for left in range(len(hashes)):
+            for right in range(left + 1, len(hashes)):
+                comparable_pairs += 1
+                near_pairs += hamming_hex(hashes[left], hashes[right]) <= 4
+    automatic["phash_near_duplicate_rate"] = (
+        near_pairs / comparable_pairs if comparable_pairs else 1.0
+    )
+    for model_key in ("vit", "osnet"):
+        metrics = [row.get("qa", {}).get("embedding", {}).get(model_key, {}) for row in rows]
+        valid = [metric for metric in metrics if metric]
+        complete = bool(valid) and len(valid) == len(rows)
+        automatic[f"{model_key}_anchor_top1"] = (
+            sum(bool(metric.get("anchor_top1")) for metric in valid) / len(valid)
+            if complete
+            else 0.0
+        )
+        automatic[f"{model_key}_margin_mean"] = (
+            sum(float(metric.get("cosine_margin", 0)) for metric in valid) / len(valid)
+            if complete
+            else 0.0
+        )
+        automatic[f"{model_key}_above_real_p05"] = complete and all(
+            metric.get("above_real_positive_p05") for metric in valid
+        )
+    manual_path = root / "rotation_pilot" / "manual_review.json"
+    manual = json.loads(manual_path.read_text(encoding="utf-8")) if manual_path.exists() else {
+        "complete": False,
+        "body_yaw_accuracy_rate": 0.0,
+        "identity_consistency_rate": 0.0,
+        "camera_pitch_consistency_rate": 0.0,
+        "camera_geometry_failures": None,
+        "major_anatomy_failures": None,
+        "text_logo_watermark_failures": None,
+    }
+    thresholds = config["qa"]
+    gates = {
+        "image_count": len(rows) == expected,
+        "decode": automatic["decode_rate"] >= float(thresholds["decode_rate_min"]),
+        "geometry": automatic["geometry_rate"] >= float(thresholds["geometry_rate_min"]),
+        "framing": automatic["framing_rate"] >= float(thresholds["geometry_rate_min"]),
+        "yaw_distribution": automatic["planned_yaw_distribution_valid"],
+        "unique_sha": automatic["sha_unique"],
+        "phash_duplicates": automatic["phash_near_duplicate_rate"]
+        < float(thresholds["phash_near_duplicate_rate_max"]),
+        "vit_embedding": automatic["vit_anchor_top1"] >= float(thresholds["anchor_top1_min"])
+        and automatic["vit_margin_mean"] >= float(thresholds["cosine_margin_min"])
+        and automatic["vit_above_real_p05"],
+        "osnet_embedding": automatic["osnet_anchor_top1"]
+        >= float(thresholds["anchor_top1_min"])
+        and automatic["osnet_margin_mean"] >= float(thresholds["cosine_margin_min"])
+        and automatic["osnet_above_real_p05"],
+        "manual_review": bool(manual.get("complete"))
+        and float(manual.get("body_yaw_accuracy_rate", 0))
+        >= float(thresholds["body_yaw_accuracy_min"])
+        and float(manual.get("identity_consistency_rate", 0))
+        >= float(thresholds["identity_consistency_min"])
+        and float(manual.get("camera_pitch_consistency_rate", 0))
+        >= float(thresholds["camera_pitch_consistency_min"])
+        and int(manual.get("camera_geometry_failures") or 0) == 0
+        and int(manual.get("major_anatomy_failures") or 0) == 0
+        and int(manual.get("text_logo_watermark_failures") or 0) == 0,
+    }
+    attempts = [
+        row for row in read_jsonl(paths["attempts"])
+        if row.get("scope") == "rotation_pilot"
+    ]
+    usage = aggregate_usage(row.get("usage", {}) for row in attempts)
+    report = {
+        "schema_version": SCHEMA_VERSION,
+        "created_at": utc_now(),
+        "model_id": config["model"]["api_id"],
+        "catalog_snapshot": config["model"]["catalog_snapshot"],
+        "reference_inputs": _reference_metadata(config),
+        "config_sha256": config_sha256(config),
+        "automatic": automatic,
+        "manual": manual,
+        "gates": gates,
+        "rotation_gate_passed": all(gates.values()),
+        "usage": usage,
+        "actual_cost_usd": usage_cost_usd(usage, config),
+    }
+    atomic_write_json(paths["rotation_pilot_report"], report)
+    return report
+
+
+def run_rotation_pilot_qa(
+    root: Path, config: Mapping[str, Any], config_path: Path
+) -> dict[str, Any]:
+    paths = initialize(root, config)
+    rows = read_jsonl(paths["rotation_pilot_manifest"])
+    expected = int(config["body_rotation"]["pilot_identities"]) * int(
+        config["body_rotation"]["pilot_samples_per_identity"]
+    )
+    if len(rows) != expected:
+        raise PipelineError(
+            f"body-rotation embedding QA requires {expected} accepted images; found {len(rows)}"
+        )
+    rows = _apply_anchor_embedding_qa(root, config, config_path, rows, identity_count=12)
+    for row in rows:
+        row.setdefault("qa", {})["phash"] = row.get("qa", {}).get("phash") or perceptual_hash(
+            root / row["final_path"]
+        )
+    atomic_write_jsonl(paths["rotation_pilot_manifest"], rows)
+    contact_sheet = _write_contact_sheet(
+        root, rows, filename="rotation_pilot_contact_sheet.jpg"
+    )
+    template = root / "rotation_pilot" / "manual_review.template.json"
+    if not template.exists():
+        atomic_write_json(template, {
+            "complete": False,
+            "reviewed_contact_sheet": str(contact_sheet.relative_to(root)),
+            "body_yaw_accuracy_rate": 0.0,
+            "identity_consistency_rate": 0.0,
+            "camera_pitch_consistency_rate": 0.0,
+            "camera_geometry_failures": 0,
+            "major_anatomy_failures": 0,
+            "text_logo_watermark_failures": 0,
+            "reviewer_notes": (
+                "Copy to rotation_pilot/manual_review.json after checking all 96 labeled yaw "
+                "views and their labeled camera pitches."
+            ),
+        })
+    report = build_rotation_pilot_report(root, config)
+    print(f"body-rotation QA complete; review {contact_sheet}")
+    return report
 
 
 def _retrieval_metrics(features: Any, rows: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
@@ -1204,12 +1634,18 @@ def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Pa
             "major_anatomy_failures": 0,
             "text_logo_watermark_failures": 0,
             "identity_consistency_rate": 0.0,
-            "reviewer_notes": "Copy to full_review.json after the stratified 5% and all boundary cases are reviewed.",
+            "camera_pitch_consistency_rate": 0.0,
+            "camera_geometry_failures": 0,
+            "reviewer_notes": (
+                "Copy to full_review.json after the stratified 5%, labeled camera pitch, and all "
+                "boundary cases are reviewed."
+            ),
         })
     full_report = {
         "created_at": utc_now(),
         "model_id": config["model"]["api_id"],
         "catalog_snapshot": config["model"]["catalog_snapshot"],
+        "reference_inputs": _reference_metadata(config),
         "generated": len(rows),
         "accepted": len(accepted),
         "rejected": len(rejected),
@@ -1220,7 +1656,10 @@ def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Pa
     atomic_write_json(root / "qa" / "full_report.json", full_report)
     print(json.dumps(full_report, ensure_ascii=False, indent=2))
     if rejected:
-        print("rejected samples were marked qa_failed; run full --resume for bounded replacements")
+        print(
+            "rejected samples were marked qa_failed; automatic API retries are disabled. "
+            "Run repair-local --scope full, then report-failures --scope full."
+        )
 
 
 def _repair_candidate_rank(job: Mapping[str, Any], qa: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -1231,9 +1670,325 @@ def _repair_candidate_rank(job: Mapping[str, Any], qa: Mapping[str, Any]) -> tup
         bool(qa.get("accepted")),
         minimum_pose_score,
         detection_score,
-        str(job.get("quality")) == "medium",
         -int(job.get("attempt", 0)),
     )
+
+
+def _internal_scope(scope: str) -> str:
+    aliases = {"pilot": "pilot", "rotation-pilot": "rotation_pilot", "full": "full"}
+    try:
+        return aliases[scope]
+    except KeyError as exc:
+        raise ValueError(f"unsupported repair scope: {scope}") from exc
+
+
+def _scope_specs(paths: Mapping[str, Path], scope: str) -> dict[str, dict[str, Any]]:
+    path_key = {
+        "pilot": "pilot_samples",
+        "rotation_pilot": "rotation_pilot_samples",
+        "full": "samples",
+    }[scope]
+    return {row["sample_id"]: row for row in read_jsonl(paths[path_key])}
+
+
+def _scope_manifest_path(paths: Mapping[str, Path], scope: str) -> Path:
+    return paths[{
+        "pilot": "pilot_manifest",
+        "rotation_pilot": "rotation_pilot_manifest",
+        "full": "manifest",
+    }[scope]]
+
+
+def _local_final_path(root: Path, scope: str, sample: Mapping[str, Any]) -> Path:
+    if scope == "pilot":
+        directory = root / "pilot" / "images"
+    elif scope == "rotation_pilot":
+        directory = root / "rotation_pilot" / "images"
+    else:
+        directory = root / "candidates" / str(sample["split"])
+    return directory / f"{sample['sample_id']}.jpg"
+
+
+def _manifest_row_valid(root: Path, row: Mapping[str, Any] | None, scope: str) -> tuple[bool, str]:
+    if row is None:
+        return False, "manifest_missing"
+    relative = row.get("final_path")
+    if not isinstance(relative, str):
+        return False, "final_path_missing"
+    path = (root / relative).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError:
+        return False, "final_path_escapes_root"
+    if not path.is_file():
+        return False, "final_image_missing"
+    try:
+        from PIL import Image
+
+        with Image.open(path) as image:
+            image.load()
+            if image.format != "JPEG" or image.size != (128, 256):
+                return False, "final_image_format_or_size_invalid"
+    except (ImportError, OSError):
+        return False, "final_image_decode_failed"
+    try:
+        actual_sha = sha256_file(path)
+    except OSError:
+        return False, "final_image_unreadable"
+    if actual_sha != row.get("final_sha256"):
+        return False, "final_sha256_mismatch"
+    allowed_statuses = {"accepted"} if scope != "full" else {"geometry_passed", "accepted"}
+    if row.get("qa_status") not in allowed_statuses:
+        return False, "qa_status_not_releasable"
+    if not row.get("qa", {}).get("accepted"):
+        return False, "local_geometry_not_accepted"
+    if row.get("processing_version") != PROCESSING_VERSION:
+        return False, "processing_version_stale"
+    return True, "valid"
+
+
+def _successful_raw_candidates(
+    root: Path,
+    scope: str,
+    jobs: Sequence[Mapping[str, Any]],
+    attempts_by_id: Mapping[str, Mapping[str, Any]],
+) -> dict[str, list[tuple[dict[str, Any], dict[str, Any], Path]]]:
+    candidates: dict[str, list[tuple[dict[str, Any], dict[str, Any], Path]]] = defaultdict(list)
+    for job_row in jobs:
+        job = dict(job_row)
+        if job.get("scope") != scope or job.get("kind") != "sample":
+            continue
+        attempt_row = attempts_by_id.get(str(job["custom_id"]))
+        if attempt_row is None or attempt_row.get("classification") != "succeeded":
+            continue
+        raw = root / "raw" / scope / f"{job['custom_id']}.jpg"
+        if raw.is_file():
+            candidates[str(job["sample_id"])].append((job, dict(attempt_row), raw))
+    return candidates
+
+
+def report_local_failures(
+    root: Path,
+    config: Mapping[str, Any],
+    requested_scope: str,
+    limit: int = 100,
+) -> dict[str, Any]:
+    """Report unresolved specifications and whether a successful raw response can rebuild them."""
+    paths = initialize(root, config)
+    scope = _internal_scope(requested_scope)
+    specs = _scope_specs(paths, scope)
+    manifest_rows = {row["sample_id"]: row for row in read_jsonl(_scope_manifest_path(paths, scope))}
+    jobs = read_jsonl(paths["jobs"])
+    attempts = read_jsonl(paths["attempts"])
+    attempts_by_id = {row["custom_id"]: row for row in attempts}
+    raw_candidates = _successful_raw_candidates(root, scope, jobs, attempts_by_id)
+    jobs_by_sample: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    for job in jobs:
+        if job.get("scope") == scope and job.get("kind") == "sample":
+            jobs_by_sample[str(job["sample_id"])].append(job)
+    valid = 0
+    recoverable = []
+    awaiting_first_attempt = []
+    failed_without_raw = []
+    for sample_id in sorted(specs):
+        is_valid, reason = _manifest_row_valid(root, manifest_rows.get(sample_id), scope)
+        if is_valid:
+            valid += 1
+            continue
+        rows = jobs_by_sample.get(sample_id, [])
+        status = max(rows, key=lambda row: int(row.get("attempt", 0))).get("status") if rows else "not_planned"
+        item = {
+            "sample_id": sample_id,
+            "reason": reason,
+            "job_status": status,
+            "successful_raw_candidates": len(raw_candidates.get(sample_id, [])),
+        }
+        if sample_id in raw_candidates:
+            recoverable.append(item)
+        elif status in {"not_planned", "planned", "blocked_on_refs", "submitted"}:
+            awaiting_first_attempt.append(item)
+        else:
+            failed_without_raw.append(item)
+    active_batches = [
+        {"batch_id": row.get("batch_id"), "status": row.get("status")}
+        for row in read_jsonl(paths["batches"])
+        if row.get("scope") == scope
+        and (
+            row.get("status") in {"validating", "in_progress", "finalizing", "cancelling"}
+            or (row.get("status") == "completed" and not row.get("collected"))
+        )
+    ]
+    return {
+        "scope": requested_scope,
+        "specifications": len(specs),
+        "valid_final_images": valid,
+        "unresolved": len(recoverable) + len(awaiting_first_attempt) + len(failed_without_raw),
+        "recoverable_from_successful_raw": len(recoverable),
+        "awaiting_first_attempt": len(awaiting_first_attempt),
+        "failed_without_successful_raw": len(failed_without_raw),
+        "automatic_api_retries": int(config["batch"]["max_attempts"]) - 1,
+        "active_batches": active_batches,
+        "recoverable": recoverable[:limit],
+        "awaiting": awaiting_first_attempt[:limit],
+        "failed": failed_without_raw[:limit],
+        "details_truncated": any(
+            len(rows) > limit
+            for rows in (recoverable, awaiting_first_attempt, failed_without_raw)
+        ),
+    }
+
+
+def repair_local(
+    root: Path,
+    config: Mapping[str, Any],
+    requested_scope: str,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """Rebuild missing or invalid derived images from successful API raw responses only."""
+    paths = initialize(root, config)
+    scope = _internal_scope(requested_scope)
+    active = [
+        row for row in read_jsonl(paths["batches"])
+        if row.get("scope") == scope
+        and (
+            row.get("status") in {"validating", "in_progress", "finalizing", "cancelling"}
+            or (row.get("status") == "completed" and not row.get("collected"))
+        )
+    ]
+    if active:
+        states = ", ".join(f"{row.get('batch_id')}:{row.get('status')}" for row in active)
+        raise PipelineError(
+            f"local repair requires collected terminal Batch state for {requested_scope}: {states}"
+        )
+    specs = _scope_specs(paths, scope)
+    manifest_path = _scope_manifest_path(paths, scope)
+    manifest_rows = {row["sample_id"]: row for row in read_jsonl(manifest_path)}
+    jobs = read_jsonl(paths["jobs"])
+    jobs_by_id = {row["custom_id"]: row for row in jobs}
+    attempts = read_jsonl(paths["attempts"])
+    attempts_by_id = {row["custom_id"]: row for row in attempts}
+    cameras = read_jsonl(paths["cameras"])
+    assets = {row["asset_id"]: row for row in read_jsonl(paths["assets"])}
+    raw_candidates = _successful_raw_candidates(root, scope, jobs, attempts_by_id)
+    needs_repair = []
+    already_valid = 0
+    initial_reasons: dict[str, str] = {}
+    for sample_id in sorted(specs):
+        valid, reason = _manifest_row_valid(root, manifest_rows.get(sample_id), scope)
+        if valid:
+            already_valid += 1
+        else:
+            needs_repair.append(sample_id)
+            initial_reasons[sample_id] = reason
+
+    qa_dir = root / "qa"
+    qa_dir.mkdir(parents=True, exist_ok=True)
+    repaired: dict[str, tuple[dict[str, Any], dict[str, Any], dict[str, Any], Path, int]] = {}
+    rejected: dict[str, list[dict[str, Any]]] = {}
+    missing_raw = []
+    with tempfile.TemporaryDirectory(prefix=f".local-repair-{scope}-", dir=qa_dir) as temporary:
+        work = Path(temporary)
+        processed = 0
+        for sample_id in needs_repair:
+            sample = specs[sample_id]
+            candidates = raw_candidates.get(sample_id, [])
+            if not candidates:
+                missing_raw.append(sample_id)
+                continue
+            evaluated = []
+            for job, attempt, raw in candidates:
+                candidate_path = work / f"{job['custom_id']}.jpg"
+                qa = process_image(
+                    raw,
+                    candidate_path,
+                    cameras[int(sample["local_camera"])],
+                    sample,
+                    config,
+                )
+                evaluated.append((job, attempt, qa, candidate_path))
+                processed += 1
+            winner = max(evaluated, key=lambda row: _repair_candidate_rank(row[0], row[2]))
+            if winner[2].get("accepted"):
+                repaired[sample_id] = (*winner, len(evaluated))
+            else:
+                rejected[sample_id] = [
+                    {
+                        "custom_id": job["custom_id"],
+                        "reason": qa.get("reason"),
+                        "attempt": job.get("attempt"),
+                    }
+                    for job, _attempt, qa, _candidate in evaluated
+                ]
+            if processed and processed % 100 == 0:
+                print(f"local repair QA: {processed} raw candidates processed", file=sys.stderr)
+
+        report = {
+            "created_at": utc_now(),
+            "scope": requested_scope,
+            "specifications": len(specs),
+            "already_valid": already_valid,
+            "needed_repair": len(needs_repair),
+            "raw_candidates_processed": processed,
+            "locally_repairable": len(repaired),
+            "missing_successful_raw_count": len(missing_raw),
+            "missing_successful_raw": missing_raw[:100],
+            "local_qa_rejected": rejected,
+            "initial_reason_counts": dict(Counter(initial_reasons.values())),
+            "initial_reasons": dict(list(initial_reasons.items())[:100]),
+            "details_truncated": len(missing_raw) > 100 or len(initial_reasons) > 100,
+            "automatic_api_retries": int(config["batch"]["max_attempts"]) - 1,
+            "dry_run": dry_run,
+        }
+        if dry_run:
+            print(json.dumps(report, ensure_ascii=False, indent=2))
+            return report
+
+        for sample_id in sorted(repaired):
+            job, attempt, qa, candidate_path, candidate_count = repaired[sample_id]
+            sample = specs[sample_id]
+            final = _local_final_path(root, scope, sample)
+            atomic_write_bytes(final, candidate_path.read_bytes())
+            qa = dict(qa)
+            qa["final_sha256"] = sha256_file(final)
+            selection = {
+                "method": "local_raw_reprocess",
+                "processing_version": qa.get("processing_version"),
+                "candidate_count": candidate_count,
+                "selected_custom_id": job["custom_id"],
+            }
+            qa_status = "accepted" if scope != "full" else "geometry_passed"
+            manifest_rows[sample_id] = _sample_manifest_row(
+                root,
+                config,
+                sample,
+                job,
+                attempt,
+                cameras,
+                assets,
+                qa,
+                final,
+                qa_status=qa_status,
+                selection=selection,
+            )
+            attempts_by_id[job["custom_id"]]["qa_reprocessed"] = qa
+            attempts_by_id[job["custom_id"]]["selected_by_local_repair"] = True
+            jobs_by_id[job["custom_id"]]["status"] = "succeeded"
+
+        atomic_write_jsonl(
+            manifest_path, sorted(manifest_rows.values(), key=lambda row: row["sample_id"])
+        )
+        atomic_write_jsonl(
+            paths["attempts"], [attempts_by_id[row["custom_id"]] for row in attempts]
+        )
+        atomic_write_jsonl(
+            paths["jobs"], sorted(jobs_by_id.values(), key=lambda row: row["custom_id"])
+        )
+        report["repaired"] = len(repaired)
+        report["remaining_unresolved"] = len(missing_raw) + len(rejected)
+        report_path = qa_dir / f"local_repair_{scope}_report.json"
+        atomic_write_json(report_path, report)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        return report
 
 
 def repair_pilot(root: Path, config: Mapping[str, Any], dry_run: bool = False) -> dict[str, Any]:
@@ -1253,8 +2008,11 @@ def repair_pilot(root: Path, config: Mapping[str, Any], dry_run: bool = False) -
         )
 
     specs = {row["sample_id"]: row for row in read_jsonl(paths["pilot_samples"])}
-    if len(specs) != 192:
-        raise PipelineError(f"pilot repair expected 192 specifications, found {len(specs)}")
+    expected = 96
+    if len(specs) != expected:
+        raise PipelineError(
+            f"pilot repair expected {expected} Low specifications, found {len(specs)}"
+        )
     jobs = read_jsonl(paths["jobs"])
     attempts = read_jsonl(paths["attempts"])
     attempts_by_id = {row["custom_id"]: row for row in attempts}
@@ -1326,7 +2084,7 @@ def repair_pilot(root: Path, config: Mapping[str, Any], dry_run: bool = False) -
         if not report["complete"]:
             atomic_write_json(qa_dir / "pilot_repair_report.json", report)
             raise PipelineError(
-                f"pilot repair could select {len(selected)}/192 specifications; "
+                f"pilot repair could select {len(selected)}/{expected} specifications; "
                 "no manifest or final image was changed"
             )
         if dry_run:
@@ -1377,8 +2135,47 @@ def command_pilot(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
     run_live(args.root, config, "pilot")
 
 
+def command_rotation_pilot(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
+    jobs, paths = plan_scope(args.root, config, "rotation_pilot")
+    if args.dry_run:
+        written = write_dry_run_requests(args.root, "rotation_pilot", jobs, config)
+        print(
+            f"body-rotation pilot dry-run ready: {len(written)} JSONL files; "
+            "no API request was made"
+        )
+        return
+    if not args.resume:
+        raise PipelineError("live body-rotation pilot execution requires --resume")
+    assets = {row["asset_id"]: row for row in read_jsonl(paths["assets"])}
+    required = {
+        *(_asset_id("plate", camera) for camera in range(33)),
+        *(
+            _asset_id("anchor", pid, orientation)
+            for pid in range(12)
+            for orientation in ASSET_ORIENTATIONS
+        ),
+    }
+    missing = sorted(asset_id for asset_id in required if not assets.get(asset_id, {}).get("file_id"))
+    if missing:
+        raise PipelineError(
+            f"body-rotation pilot requires all 81 existing pilot assets; missing {len(missing)}"
+        )
+    run_live(args.root, config, "rotation_pilot")
+
+
 def command_repair_pilot(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
     repair_pilot(args.root, config, dry_run=args.dry_run)
+
+
+def command_repair_local(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
+    repair_local(args.root, config, args.scope, dry_run=args.dry_run)
+
+
+def command_report_failures(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
+    if args.limit < 0:
+        raise ValueError("--limit must be zero or greater")
+    report = report_local_failures(args.root, config, args.scope, limit=args.limit)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 def command_report(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
@@ -1390,6 +2187,10 @@ def command_qa(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
     if args.scope == "pilot":
         run_embedding_qa(args.root, config, args.config.resolve())
         command_report(args, config)
+    elif args.scope == "rotation-pilot":
+        report = run_rotation_pilot_qa(args.root, config, args.config.resolve())
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+        command_report(args, config)
     else:
         run_full_embedding_qa(args.root, config, args.config.resolve())
 
@@ -1399,7 +2200,7 @@ def command_approve(args: argparse.Namespace, config: Mapping[str, Any]) -> None
     if not paths["report"].exists():
         raise PipelineError("pilot report does not exist; run report first")
     report = json.loads(paths["report"].read_text(encoding="utf-8"))
-    selected_forecast = report.get("forecast_total_usd_including_20pct_retry", {}).get(args.quality)
+    selected_forecast = report.get(FORECAST_KEY, {}).get(args.quality)
     if selected_forecast is None:
         raise PipelineError("selected quality has no measured pilot cost forecast")
     if float(selected_forecast) > args.max_usd:
@@ -1415,7 +2216,7 @@ def command_full(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
     jobs, paths = plan_scope(args.root, config, "full")
     approval = json.loads(paths["approval"].read_text(encoding="utf-8"))
     report = json.loads(paths["report"].read_text(encoding="utf-8"))
-    forecast = report["forecast_total_usd_including_20pct_retry"][approval["quality"]]
+    forecast = report[FORECAST_KEY][approval["quality"]]
     if float(forecast) > float(approval["max_usd"]):
         raise PipelineError("approved ceiling is below the current signed forecast")
     if args.dry_run:
@@ -1435,13 +2236,32 @@ def build_parser() -> argparse.ArgumentParser:
     pilot = sub.add_parser("pilot", help="plan or advance the 12-ID pilot")
     pilot.add_argument("--dry-run", action="store_true")
     pilot.add_argument("--resume", action="store_true", help="poll completed batches and submit newly unblocked stages")
+    rotation_pilot = sub.add_parser(
+        "rotation-pilot", help="plan or advance the 12-ID, eight-yaw low-quality pilot"
+    )
+    rotation_pilot.add_argument("--dry-run", action="store_true")
+    rotation_pilot.add_argument("--resume", action="store_true")
     repair = sub.add_parser("repair-pilot", help="re-QA raw pilot attempts and select one per specification")
     repair.add_argument("--dry-run", action="store_true")
+    local_repair = sub.add_parser(
+        "repair-local", help="rebuild derived images from successful raw responses without API calls"
+    )
+    local_repair.add_argument(
+        "--scope", choices=("pilot", "rotation-pilot", "full"), required=True
+    )
+    local_repair.add_argument("--dry-run", action="store_true")
+    failures = sub.add_parser(
+        "report-failures", help="show unresolved samples and local raw recoverability"
+    )
+    failures.add_argument(
+        "--scope", choices=("pilot", "rotation-pilot", "full"), required=True
+    )
+    failures.add_argument("--limit", type=int, default=100)
     sub.add_parser("report", help="calculate pilot QA gates and measured cost forecast")
     qa = sub.add_parser("qa", help="run ViT/OSNet QA and create manual contact sheets")
-    qa.add_argument("--scope", choices=("pilot", "full"), default="pilot")
+    qa.add_argument("--scope", choices=("pilot", "rotation-pilot", "full"), default="pilot")
     approve = sub.add_parser("approve", help="sign the pilot report and set the full-run ceiling")
-    approve.add_argument("--quality", required=True, choices=("low", "medium"))
+    approve.add_argument("--quality", required=True, choices=("low",))
     approve.add_argument("--max-usd", required=True, type=float)
     full = sub.add_parser("full", help="plan or advance the approved 20,000-image run")
     full.add_argument("--dry-run", action="store_true")
@@ -1457,7 +2277,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.root = args.root.resolve()
         {
             "pilot": command_pilot,
+            "rotation-pilot": command_rotation_pilot,
             "repair-pilot": command_repair_pilot,
+            "repair-local": command_repair_local,
+            "report-failures": command_report_failures,
             "report": command_report,
             "qa": command_qa,
             "approve": command_approve,

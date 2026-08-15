@@ -26,7 +26,11 @@ except ImportError as exc:  # pragma: no cover - exercised by CLI preflight
 
 SCHEMA_VERSION = "synth-reid33/v1"
 PROCESSING_VERSION = "synth-reid33-isp-v4-tight-crop-torchvision-qa"
+CAMERA_GEOMETRY_VERSION = "synth-reid33-camera-geometry-v1"
+PROMPT_VERSION = "synth-reid33-prompt-v3-eight-yaw-camera-pitch"
 SPLITS = ("train", "query", "gallery")
+BODY_YAW_DEGREES = (0, 45, 90, 135, 180, -135, -90, -45)
+ANCHOR_ORIENTATIONS = {"front", "left", "right", "back"}
 PERSON_SCORE_MIN = 0.35
 PERSON_NMS_IOU = 0.35
 POSE_SCORE_MIN = 0.70
@@ -66,8 +70,72 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("Batch model must be the explicitly approved gpt-image-2 alias")
     if config["model"].get("catalog_snapshot") != "gpt-image-2-2026-04-21":
         raise ValueError("catalog snapshot must be gpt-image-2-2026-04-21")
+    if config["model"].get("quality") != "low":
+        raise ValueError("every image request is cost-locked to low quality")
+    expected_model_sizes = {
+        "anchor_size": "1024x1536",
+        "sample_size": "576x1152",
+        "reference_profile": "native_quarter",
+        "reference_anchor_size": "256x384",
+        "reference_plate_size": "144x288",
+        "reference_jpeg_quality": 95,
+        "reference_jpeg_subsampling": 0,
+    }
+    for key, expected in expected_model_sizes.items():
+        if config["model"].get(key) != expected:
+            raise ValueError(
+                f"model.{key} must be {expected!r} for the approved native_quarter profile"
+            )
+    if config.get("prompt", {}).get("version") != PROMPT_VERSION:
+        raise ValueError(f"prompt.version must be {PROMPT_VERSION}")
     if len(config["sites"]) != 11 or len(config["camera_views"]) != 3:
         raise ValueError("configuration must expand to 11 sites x 3 cameras")
+    geometry = config.get("camera_geometry") or {}
+    if geometry.get("version") != CAMERA_GEOMETRY_VERSION:
+        raise ValueError(f"camera_geometry.version must be {CAMERA_GEOMETRY_VERSION}")
+    if geometry.get("pitch_convention") != "negative_is_down":
+        raise ValueError("camera pitch convention must be negative_is_down")
+    sensor_height = float(geometry.get("sensor_height_mm", 0))
+    if sensor_height <= 0:
+        raise ValueError("camera_geometry.sensor_height_mm must be positive")
+    horizon_range = geometry.get("horizon_fraction_range") or []
+    if (
+        len(horizon_range) != 2
+        or not 0 <= float(horizon_range[0]) < float(horizon_range[1]) <= 1
+    ):
+        raise ValueError("camera_geometry.horizon_fraction_range must be inside [0, 1]")
+    for view in config["camera_views"]:
+        pitch = float(view.get("pitch_deg", 0))
+        pitch_jitter = float(view.get("pitch_jitter_deg", 0))
+        height = float(view.get("mounting_height_m", 0))
+        height_jitter = float(view.get("mounting_height_jitter_m", 0))
+        focal = float(view.get("focal_mm", 0))
+        if not (-45 < pitch < 0) or pitch_jitter <= 0 or pitch + pitch_jitter >= 0:
+            raise ValueError(
+                f"camera view {view.get('key')} must remain downward through its pitch jitter range"
+            )
+        if height <= 0 or height_jitter <= 0 or height - height_jitter < 2.0:
+            raise ValueError(
+                f"camera view {view.get('key')} must remain at least 2m above the walking surface"
+            )
+        if focal <= 0:
+            raise ValueError(f"camera view {view.get('key')} must have a positive focal length")
+    rotation = config.get("body_rotation") or {}
+    views = rotation.get("views") or []
+    if tuple(int(view.get("degrees")) for view in views) != BODY_YAW_DEGREES:
+        raise ValueError(f"body_rotation.views must use the ordered yaw bins {BODY_YAW_DEGREES}")
+    if len({str(view.get("label")) for view in views}) != len(BODY_YAW_DEGREES):
+        raise ValueError("body_rotation view labels must be unique")
+    if any(str(view.get("anchor")) not in ANCHOR_ORIENTATIONS for view in views):
+        raise ValueError("every body_rotation view must reference a cardinal anchor")
+    if int(rotation.get("pilot_identities", 0)) != 12:
+        raise ValueError("the body-rotation pilot must use the existing 12 pilot identities")
+    if int(rotation.get("pilot_samples_per_identity", 0)) != len(BODY_YAW_DEGREES):
+        raise ValueError("the body-rotation pilot must contain one sample per yaw and identity")
+    if int(config["batch"].get("max_attempts", 0)) != 1:
+        raise ValueError("automatic API retries are disabled; batch.max_attempts must be 1")
+    if float(config["batch"].get("retry_reserve_fraction", -1)) != 0.0:
+        raise ValueError("automatic API retries are disabled; retry_reserve_fraction must be 0")
     return config
 
 
@@ -165,6 +233,42 @@ def make_cameras(config: Mapping[str, Any]) -> list[dict[str, Any]]:
         for view_index, view in enumerate(config["camera_views"]):
             local_camera = site_index * 3 + view_index
             rng = stable_rng(seed, "camera", local_camera)
+            geometry_rng = stable_rng(seed, "camera_geometry", local_camera)
+            pitch_deg = round(
+                float(view["pitch_deg"])
+                + geometry_rng.uniform(
+                    -float(view["pitch_jitter_deg"]), float(view["pitch_jitter_deg"])
+                ),
+                2,
+            )
+            mounting_height_m = round(
+                float(view["mounting_height_m"])
+                + geometry_rng.uniform(
+                    -float(view["mounting_height_jitter_m"]),
+                    float(view["mounting_height_jitter_m"]),
+                ),
+                2,
+            )
+            pitch_down_deg = -pitch_deg
+            sensor_height_mm = float(config["camera_geometry"]["sensor_height_mm"])
+            horizon_y_fraction = round(
+                0.5
+                - math.tan(math.radians(pitch_down_deg))
+                * float(view["focal_mm"])
+                / sensor_height_mm,
+                4,
+            )
+            camera_geometry = {
+                "version": config["camera_geometry"]["version"],
+                "pitch_convention": config["camera_geometry"]["pitch_convention"],
+                "base_pitch_deg": float(view["pitch_deg"]),
+                "pitch_deg": pitch_deg,
+                "pitch_down_deg": round(pitch_down_deg, 2),
+                "mounting_height_m": mounting_height_m,
+                "horizon_y_fraction": horizon_y_fraction,
+                "focal_mm": float(view["focal_mm"]),
+                "yaw_deg": float(view["yaw_deg"]),
+            }
             wb = [round(1.0 + rng.uniform(-0.07, 0.07), 5) for _ in range(3)]
             matrix = []
             for channel in range(3):
@@ -183,8 +287,11 @@ def make_cameras(config: Mapping[str, Any]) -> list[dict[str, Any]]:
                 "view": view["key"],
                 "view_label": view["label"],
                 "yaw_deg": view["yaw_deg"],
-                "pitch_deg": view["pitch_deg"],
+                "pitch_deg": pitch_deg,
                 "focal_mm": view["focal_mm"],
+                "mounting_height_m": mounting_height_m,
+                "horizon_y_fraction": horizon_y_fraction,
+                "geometry": camera_geometry,
                 "isp": {
                     "white_balance_rgb": wb,
                     "color_matrix_rgb": matrix,
@@ -318,31 +425,60 @@ def _orientation(frame: int, local_camera: int) -> str:
     return "left" if local_camera % 2 else "right"
 
 
+def _body_rotation_views(config: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [dict(view) for view in config["body_rotation"]["views"]]
+
+
+def _body_rotation_fields(view: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "orientation": str(view["label"]),
+        "anchor_orientation": str(view["anchor"]),
+        "body_yaw_deg": int(view["degrees"]),
+        "body_yaw_label": str(view["label"]),
+        "body_yaw_prompt": str(view["prompt"]),
+    }
+
+
 def make_samples(config: Mapping[str, Any], cameras_by_pid: Mapping[int, Sequence[int]]) -> list[dict[str, Any]]:
     dataset = config["dataset"]
     seed = int(config["allocation"]["seed"])
     train_ids = int(dataset["train_identities"])
     frames_per_camera = int(dataset["frames_per_camera"])
     global_offset = int(dataset["camera_global_offset"])
+    rotation_views = _body_rotation_views(config)
+    yaw_count = len(rotation_views)
     samples: list[dict[str, Any]] = []
     seq = 0
     for pid in range(int(dataset["identities"])):
         cameras = list(cameras_by_pid[pid])
+        rotation_offset = stable_rng(seed, "body-yaw-offset", pid).randrange(yaw_count)
+        rotation_by_sample: dict[tuple[int, int], tuple[int, dict[str, Any]]] = {}
         site_samples: dict[int, list[tuple[int, int]]] = defaultdict(list)
-        for camera in cameras:
+        for camera_rank, camera in enumerate(cameras):
             for frame in range(frames_per_camera):
-                site_samples[camera // 3].append((camera, frame))
+                key = (camera, frame)
+                yaw_index = (camera_rank * frames_per_camera + frame + rotation_offset) % yaw_count
+                rotation_by_sample[key] = (yaw_index, rotation_views[yaw_index])
+                site_samples[camera // 3].append(key)
         occluded: set[tuple[int, int]] = set()
         query: set[tuple[int, int]] = set()
-        for site, choices in site_samples.items():
+        query_base = stable_rng(seed, "query-yaw", pid).randrange(yaw_count)
+        for site_order, (site, choices) in enumerate(sorted(site_samples.items())):
             rng = stable_rng(seed, "occlusion", pid, site)
             if pid < train_ids:
                 occluded.update(rng.sample(choices, 3))
             else:
-                query.add(rng.choice(choices))
+                target_yaw = (query_base + site_order * 2) % yaw_count
+                target_choices = [
+                    choice for choice in choices if rotation_by_sample[choice][0] == target_yaw
+                ]
+                if not target_choices:
+                    raise RuntimeError(f"pid {pid} site {site}: no sample for query yaw {target_yaw}")
+                query.add(rng.choice(target_choices))
         for camera in cameras:
             for frame in range(frames_per_camera):
                 key = (camera, frame)
+                _yaw_index, rotation_view = rotation_by_sample[key]
                 is_query = key in query
                 is_occluded = key in occluded or is_query
                 split = "train" if pid < train_ids else ("query" if is_query else "gallery")
@@ -358,7 +494,7 @@ def make_samples(config: Mapping[str, Any], cameras_by_pid: Mapping[int, Sequenc
                     "global_camera": global_offset + camera,
                     "site_index": camera // 3,
                     "frame": frame,
-                    "orientation": _orientation(frame, camera),
+                    **_body_rotation_fields(rotation_view),
                     "occluded": is_occluded,
                     "occluder": rng.choice(["railing", "bollard", "plain luggage cart", "low wall"]) if is_occluded else None,
                     "target_occlusion_ratio": round(rng.uniform(0.20, 0.50), 4) if is_occluded else 0.0,
@@ -371,36 +507,78 @@ def make_samples(config: Mapping[str, Any], cameras_by_pid: Mapping[int, Sequenc
     return samples
 
 
+def make_rotation_pilot_samples(
+    config: Mapping[str, Any], pilot_cameras: Mapping[int, Sequence[int]]
+) -> list[dict[str, Any]]:
+    """Build a low-cost 12-ID pilot containing every planned body yaw once per ID."""
+    seed = int(config["allocation"]["seed"])
+    offset = int(config["dataset"]["camera_global_offset"])
+    rotation = config["body_rotation"]
+    views = _body_rotation_views(config)
+    rows = []
+    for pid in range(int(rotation["pilot_identities"])):
+        cameras = list(pilot_cameras[pid])
+        yaw_offset = stable_rng(seed, "rotation-pilot-yaw", pid).randrange(len(views))
+        for index, camera in enumerate(cameras):
+            view = views[(index + yaw_offset) % len(views)]
+            rng = stable_rng(seed, "rotation-pilot", pid, camera)
+            rows.append({
+                "sample_id": f"rotation-pilot-p{pid:03d}-c{camera:02d}",
+                "quality": str(config["model"]["quality"]),
+                "local_pid": pid,
+                "global_pid": None,
+                "split": "rotation_pilot",
+                "domain_local": 0,
+                "domain_global": 5,
+                "local_camera": camera,
+                "global_camera": offset + camera,
+                "site_index": camera // 3,
+                "frame": index % int(config["dataset"]["frames_per_camera"]),
+                **_body_rotation_fields(view),
+                "occluded": False,
+                "occluder": None,
+                "target_occlusion_ratio": 0.0,
+                "pose": rng.choice([
+                    "walking left foot forward",
+                    "walking right foot forward",
+                    "standing mid-step",
+                ]),
+                "crop_variant": rng.choice(["centered", "slightly left", "slightly right"]),
+                "generation_seed": rng.getrandbits(63),
+            })
+    return rows
+
+
 def make_pilot_samples(config: Mapping[str, Any], pilot_cameras: Mapping[int, Sequence[int]]) -> list[dict[str, Any]]:
     seed = int(config["allocation"]["seed"])
     offset = int(config["dataset"]["camera_global_offset"])
+    quality = str(config["model"]["quality"])
     rows = []
-    for quality in config["model"]["pilot_qualities"]:
-        for pid in range(12):
-            for index, camera in enumerate(pilot_cameras[pid]):
-                rng = stable_rng(seed, "pilot", pid, camera)
-                occluded = index % 3 == 0
-                rows.append({
-                    "sample_id": f"pilot-{quality}-p{pid:03d}-c{camera:02d}",
-                    "pilot_spec_id": f"pilot-p{pid:03d}-c{camera:02d}",
-                    "quality": quality,
-                    "local_pid": pid,
-                    "global_pid": None,
-                    "split": "pilot",
-                    "domain_local": 0,
-                    "domain_global": 5,
-                    "local_camera": camera,
-                    "global_camera": offset + camera,
-                    "site_index": camera // 3,
-                    "frame": index % 5,
-                    "orientation": _orientation(index % 5, camera),
-                    "occluded": occluded,
-                    "occluder": "railing" if occluded else None,
-                    "target_occlusion_ratio": round(rng.uniform(0.20, 0.50), 4) if occluded else 0.0,
-                    "pose": rng.choice(["walking left foot forward", "walking right foot forward"]),
-                    "crop_variant": rng.choice(["centered", "slightly left", "slightly right"]),
-                    "generation_seed": rng.getrandbits(63),
-                })
+    for pid in range(12):
+        for index, camera in enumerate(pilot_cameras[pid]):
+            rng = stable_rng(seed, "pilot", pid, camera)
+            occluded = index % 3 == 0
+            rows.append({
+                "sample_id": f"pilot-{quality}-p{pid:03d}-c{camera:02d}",
+                "pilot_spec_id": f"pilot-p{pid:03d}-c{camera:02d}",
+                "quality": quality,
+                "local_pid": pid,
+                "global_pid": None,
+                "split": "pilot",
+                "domain_local": 0,
+                "domain_global": 5,
+                "local_camera": camera,
+                "global_camera": offset + camera,
+                "site_index": camera // 3,
+                "frame": index % 5,
+                "orientation": _orientation(index % 5, camera),
+                "occluded": occluded,
+                "occluder": "railing" if occluded else None,
+                "target_occlusion_ratio": round(rng.uniform(0.20, 0.50), 4) if occluded else 0.0,
+                "pose": rng.choice(["walking left foot forward", "walking right foot forward"]),
+                "crop_variant": rng.choice(["centered", "slightly left", "slightly right"]),
+                "generation_seed": rng.getrandbits(63),
+            })
     return rows
 
 
@@ -425,9 +603,18 @@ def anchor_view_prompt(orientation: str, config: Mapping[str, Any]) -> str:
 
 
 def plate_prompt(camera: Mapping[str, Any], config: Mapping[str, Any]) -> str:
+    geometry = camera["geometry"]
+    horizon_percent = round(float(geometry["horizon_y_fraction"]) * 100)
     return (
         f"Fixed empty surveillance-camera background plate of a {camera['site_label']}, "
         f"{camera['view_label']} perspective, {camera['lighting']}, documentary realism. "
+        f"Mount the camera {float(geometry['mounting_height_m']):.2f} meters above the walking "
+        f"surface and tilt its optical axis {float(geometry['pitch_down_deg']):.2f} degrees "
+        f"downward below horizontal, using an approximately {float(geometry['focal_mm']):g} mm "
+        f"full-frame-equivalent lens. Place the horizon or eye-level vanishing line around "
+        f"{horizon_percent}% of image height from the top; it may be implied by architectural "
+        "lines when no outdoor horizon is visible. Keep this a physically consistent fixed-camera "
+        "view, not an eye-level, aerial, or low-angle photograph. "
         "No people, human reflections, readable text, logos, watermark, vehicles with legible plates, or border."
     )
 
@@ -446,14 +633,119 @@ def sample_prompt(
             "of the lower or middle body, while the head, shoulders, and enough upper body remain identifiable."
         )
     revision = " Use neutral ordinary pedestrian wording." if neutral_revision else ""
+    if "body_yaw_deg" in sample:
+        rotation = (
+            f"Keep the camera fixed. Rotate the subject's torso, shoulders, hips, and feet into a "
+            f"{sample['body_yaw_prompt']} (yaw {int(sample['body_yaw_deg']):+d} degrees relative "
+            "to the camera, where 0 degrees faces the camera and 180 degrees faces away). The head "
+            "should generally follow the torso with only a small natural gaze offset. Do not mirror, "
+            "replace, or redesign any identity, clothing, footwear, or carried-item detail."
+        )
+    else:
+        rotation = f"The subject faces {sample['orientation']}."
+    geometry = camera["geometry"]
+    horizon_percent = round(float(geometry["horizon_y_fraction"]) * 100)
     return (
         f"{config['prompt']['invariant_rules']} {config['prompt']['camera_rules']} "
         f"The first input image is the exact fictional identity and wardrobe reference. The second is the "
         f"empty fixed background for camera {camera['local_camera']}. Place that same adult in the plate at "
-        f"{camera['site_label']}, viewed from {camera['view_label']}, {sample['pose']}, facing "
-        f"{sample['orientation']}, {sample['crop_variant']} composition. One principal person only."
+        f"{camera['site_label']}, viewed from {camera['view_label']}, {sample['pose']}. Preserve the "
+        f"plate's fixed camera geometry exactly: {float(geometry['mounting_height_m']):.2f} meter "
+        f"mounting height, {float(geometry['pitch_down_deg']):.2f} degree downward tilt, and "
+        f"horizon/eye-level vanishing line around {horizon_percent}% from the top. Do not change "
+        f"the camera height, pitch, lens perspective, or vanishing line. {rotation} "
+        f"Use a {sample['crop_variant']} composition. One principal person only."
         f"{occlusion}{revision}"
     )
+
+
+def validate_camera_geometry(
+    config: Mapping[str, Any], cameras: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Validate deterministic camera pose metadata before any API request is planned."""
+    errors: list[str] = []
+    horizon_low, horizon_high = (
+        float(value) for value in config["camera_geometry"]["horizon_fraction_range"]
+    )
+    sensor_height_mm = float(config["camera_geometry"]["sensor_height_mm"])
+    views = {str(view["key"]): view for view in config["camera_views"]}
+    profiles: set[tuple[float, float, float]] = set()
+    by_view: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    if len(cameras) != 33:
+        errors.append(f"expected 33 cameras, found {len(cameras)}")
+    for camera in cameras:
+        local_camera = int(camera.get("local_camera", -1))
+        geometry = camera.get("geometry") or {}
+        view_key = str(camera.get("view"))
+        view = views.get(view_key)
+        if view is None:
+            errors.append(f"camera {local_camera}: unknown view {view_key}")
+            continue
+        if geometry.get("version") != CAMERA_GEOMETRY_VERSION:
+            errors.append(f"camera {local_camera}: camera geometry version mismatch")
+            continue
+        try:
+            pitch = float(geometry["pitch_deg"])
+            pitch_down = float(geometry["pitch_down_deg"])
+            height = float(geometry["mounting_height_m"])
+            horizon = float(geometry["horizon_y_fraction"])
+            focal = float(geometry["focal_mm"])
+        except (KeyError, TypeError, ValueError):
+            errors.append(f"camera {local_camera}: incomplete numeric camera geometry")
+            continue
+        pitch_min = float(view["pitch_deg"]) - float(view["pitch_jitter_deg"])
+        pitch_max = float(view["pitch_deg"]) + float(view["pitch_jitter_deg"])
+        height_min = float(view["mounting_height_m"]) - float(
+            view["mounting_height_jitter_m"]
+        )
+        height_max = float(view["mounting_height_m"]) + float(
+            view["mounting_height_jitter_m"]
+        )
+        expected_horizon = round(
+            0.5 - math.tan(math.radians(-pitch)) * focal / sensor_height_mm, 4
+        )
+        if not pitch_min <= pitch <= pitch_max or pitch >= 0 or not math.isclose(
+            pitch_down, -pitch, abs_tol=0.011
+        ):
+            errors.append(f"camera {local_camera}: pitch is outside its downward range")
+        if not height_min <= height <= height_max:
+            errors.append(f"camera {local_camera}: mounting height is outside its range")
+        if not horizon_low <= horizon <= horizon_high:
+            errors.append(f"camera {local_camera}: horizon position is outside the safe frame range")
+        if not math.isclose(horizon, expected_horizon, abs_tol=0.0001):
+            errors.append(f"camera {local_camera}: horizon is inconsistent with pitch and focal length")
+        if not math.isclose(float(camera.get("pitch_deg", 999)), pitch, abs_tol=0.001):
+            errors.append(f"camera {local_camera}: top-level pitch differs from geometry")
+        profiles.add((pitch, height, horizon))
+        by_view[view_key].append(geometry)
+    if len(profiles) != len(cameras):
+        errors.append("every camera must have a unique fixed pitch/height/horizon profile")
+    if set(by_view) != set(views) or any(len(rows) != 11 for rows in by_view.values()):
+        errors.append("each of the three camera views must occur once at all 11 sites")
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "profiles": {
+            view_key: {
+                "count": len(rows),
+                "pitch_deg_min": min((float(row["pitch_deg"]) for row in rows), default=None),
+                "pitch_deg_max": max((float(row["pitch_deg"]) for row in rows), default=None),
+                "mounting_height_m_min": min(
+                    (float(row["mounting_height_m"]) for row in rows), default=None
+                ),
+                "mounting_height_m_max": max(
+                    (float(row["mounting_height_m"]) for row in rows), default=None
+                ),
+                "horizon_y_fraction_min": min(
+                    (float(row["horizon_y_fraction"]) for row in rows), default=None
+                ),
+                "horizon_y_fraction_max": max(
+                    (float(row["horizon_y_fraction"]) for row in rows), default=None
+                ),
+            }
+            for view_key, rows in sorted(by_view.items())
+        },
+    }
 
 
 def validate_plan(
@@ -463,7 +755,12 @@ def validate_plan(
     samples: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     expected = config["dataset"]["expected"]
+    rotation_views = _body_rotation_views(config)
+    rotation_by_degree = {int(view["degrees"]): view for view in rotation_views}
+    rotation_index = {int(view["degrees"]): index for index, view in enumerate(rotation_views)}
     errors: list[str] = []
+    camera_geometry = validate_camera_geometry(config, cameras)
+    errors.extend(camera_geometry["errors"])
     split_counts = Counter(sample["split"] for sample in samples)
     for split in SPLITS:
         if split_counts[split] != int(expected[split]):
@@ -483,6 +780,17 @@ def validate_plan(
         site_counts = Counter(row["site_index"] for row in rows)
         if sorted(site_counts.values()) != [10, 10, 10, 10]:
             errors.append(f"pid {pid}: expected four sites with ten images each")
+        yaw_counts = Counter(int(row.get("body_yaw_deg", 999)) for row in rows)
+        if yaw_counts != Counter({degrees: 5 for degrees in BODY_YAW_DEGREES}):
+            errors.append(f"pid {pid}: expected five images in each of eight body-yaw bins")
+        for row in rows:
+            view = rotation_by_degree.get(int(row.get("body_yaw_deg", 999)))
+            if view is None or (
+                row.get("body_yaw_label") != view["label"]
+                or row.get("anchor_orientation") != view["anchor"]
+            ):
+                errors.append(f"pid {pid}: inconsistent body-yaw label or anchor")
+                break
         if pid < int(config["dataset"]["train_identities"]):
             if sum(bool(row["occluded"]) for row in rows) != 12:
                 errors.append(f"pid {pid}: expected 12 train occlusions")
@@ -491,6 +799,9 @@ def validate_plan(
             galleries = [row for row in rows if row["split"] == "gallery"]
             if len(queries) != 4 or len(galleries) != 36 or not all(row["occluded"] for row in queries):
                 errors.append(f"pid {pid}: invalid query/gallery allocation")
+            query_yaws = {rotation_index[int(row["body_yaw_deg"])] for row in queries}
+            if len(query_yaws) != 4 or len({index % 2 for index in query_yaws}) != 1:
+                errors.append(f"pid {pid}: query body yaws do not cover four separated quadrants")
             for query in queries:
                 other_camera_positives = sum(
                     gallery["local_camera"] != query["local_camera"] for gallery in galleries
@@ -512,18 +823,63 @@ def validate_plan(
         "counts": dict(split_counts),
         "camera_image_counts": dict(sorted(per_camera.items())),
         "camera_count_histogram": dict(sorted(histogram.items())),
+        "body_yaw_counts": dict(sorted(Counter(
+            int(sample["body_yaw_deg"]) for sample in samples
+        ).items())),
+        "camera_geometry": camera_geometry,
     }
 
 
 def validate_pilot(samples: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     specs = {(s["pilot_spec_id"], s["local_camera"]) for s in samples}
-    coverage = Counter(int(s["local_camera"]) for s in samples if s["quality"] == "low")
+    coverage = Counter(int(s["local_camera"]) for s in samples)
     errors = []
-    if len(samples) != 192 or len(specs) != 96:
-        errors.append("pilot must contain 96 specifications at two qualities")
+    if len(samples) != 96 or len(specs) != 96:
+        errors.append("pilot must contain exactly 96 low-quality specifications")
+    if any(sample.get("quality") != "low" for sample in samples):
+        errors.append("every pilot sample must use low quality")
     if set(coverage) != set(range(33)) or min(coverage.values(), default=0) < 2:
-        errors.append("pilot must cover every camera at least twice per quality")
-    return {"valid": not errors, "errors": errors, "coverage_per_quality": dict(sorted(coverage.items()))}
+        errors.append("pilot must cover every camera at least twice")
+    return {"valid": not errors, "errors": errors, "camera_coverage": dict(sorted(coverage.items()))}
+
+
+def validate_rotation_pilot(
+    config: Mapping[str, Any], samples: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    rotation = config["body_rotation"]
+    expected_total = int(rotation["pilot_identities"]) * int(
+        rotation["pilot_samples_per_identity"]
+    )
+    errors = []
+    if len(samples) != expected_total:
+        errors.append(f"body-rotation pilot must contain {expected_total} samples")
+    coverage = Counter(int(sample["local_camera"]) for sample in samples)
+    if set(coverage) != set(range(33)) or min(coverage.values(), default=0) < 2:
+        errors.append("body-rotation pilot must cover every camera at least twice")
+    per_pid: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+    for sample in samples:
+        per_pid[int(sample["local_pid"])].append(sample)
+    expected_yaws = set(BODY_YAW_DEGREES)
+    for pid in range(int(rotation["pilot_identities"])):
+        rows = per_pid.get(pid, [])
+        if len(rows) != len(expected_yaws):
+            errors.append(f"rotation pilot pid {pid}: expected eight samples")
+            continue
+        if {int(row.get("body_yaw_deg", 999)) for row in rows} != expected_yaws:
+            errors.append(f"rotation pilot pid {pid}: every yaw must appear exactly once")
+        if any(row.get("quality") != config["model"]["quality"] for row in rows):
+            errors.append(f"rotation pilot pid {pid}: quality must be low")
+        if any(row.get("occluded") for row in rows):
+            errors.append(f"rotation pilot pid {pid}: samples must be clean")
+    return {
+        "valid": not errors,
+        "errors": errors,
+        "sample_count": len(samples),
+        "camera_coverage": dict(sorted(coverage.items())),
+        "body_yaw_counts": dict(sorted(Counter(
+            int(sample.get("body_yaw_deg", 999)) for sample in samples
+        ).items())),
+    }
 
 
 def make_batch_line(custom_id: str, endpoint: str, body: Mapping[str, Any]) -> dict[str, Any]:
@@ -606,8 +962,8 @@ def aggregate_usage(rows: Iterable[Mapping[str, Any]]) -> dict[str, int]:
 def approval_payload(
     report: Mapping[str, Any], quality: str, max_usd: float, config: Mapping[str, Any]
 ) -> dict[str, Any]:
-    if quality not in config["model"]["pilot_qualities"]:
-        raise ValueError("quality must be one of the piloted qualities")
+    if quality != config["model"]["quality"]:
+        raise ValueError("quality must be low")
     if max_usd <= 0 or not math.isfinite(max_usd):
         raise ValueError("max_usd must be a positive finite number")
     if not report.get("pilot_gate_passed"):
@@ -632,8 +988,8 @@ def verify_approval(approval: Mapping[str, Any], config: Mapping[str, Any]) -> N
         raise ValueError("approval catalog snapshot differs from config")
     if approval.get("config_sha256") != config_sha256(config):
         raise ValueError("configuration changed after approval")
-    if approval.get("quality") not in config["model"]["pilot_qualities"]:
-        raise ValueError("approval quality was not piloted")
+    if approval.get("quality") != config["model"]["quality"]:
+        raise ValueError("approval quality must be low")
     if float(approval.get("max_usd", 0)) <= 0:
         raise ValueError("approval has no valid cost ceiling")
 
@@ -972,6 +1328,7 @@ def validate_synthetic_manifest(
     seen_samples: set[str] = set()
     seen_sha: set[str] = set()
     per_pid: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    geometry_by_camera: dict[int, bytes] = {}
     resolved: list[tuple[dict[str, Any], Path]] = []
     for index, row in enumerate(selected):
         sample_id = str(row.get("sample_id", ""))
@@ -1022,6 +1379,27 @@ def validate_synthetic_manifest(
             errors.append(f"{sample_id}: PID/camera outside SyntheticReID33 range")
         if int(row.get("domain_global", -1)) != 5 or int(row.get("global_camera", -1)) != 33 + camera:
             errors.append(f"{sample_id}: expected d05 and global camera {33 + camera}")
+        geometry = row.get("camera_geometry") or {}
+        try:
+            pitch = float(geometry["pitch_deg"])
+            pitch_down = float(geometry["pitch_down_deg"])
+            mounting_height = float(geometry["mounting_height_m"])
+            horizon = float(geometry["horizon_y_fraction"])
+        except (KeyError, TypeError, ValueError):
+            errors.append(f"{sample_id}: missing numeric camera geometry")
+        else:
+            if geometry.get("version") != CAMERA_GEOMETRY_VERSION:
+                errors.append(f"{sample_id}: unexpected camera geometry version")
+            if pitch >= 0 or not math.isclose(pitch_down, -pitch, abs_tol=0.011):
+                errors.append(f"{sample_id}: invalid downward camera pitch")
+            if mounting_height < 2.0 or not 0.03 <= horizon <= 0.45:
+                errors.append(f"{sample_id}: camera height or horizon is outside the safe range")
+            profile = canonical_json(geometry)
+            prior = geometry_by_camera.setdefault(camera, profile)
+            if prior != profile:
+                errors.append(f"{sample_id}: camera {camera} geometry changed within the dataset")
+        if row.get("prompt_version") != PROMPT_VERSION:
+            errors.append(f"{sample_id}: unexpected camera-pitch prompt version")
         per_pid[pid].append(row)
         resolved.append((row, path))
     if expected and int(expected.get("total", 0)) == 20000:
@@ -1034,9 +1412,14 @@ def validate_synthetic_manifest(
         )
         if camera_histogram != Counter({600: 2, 605: 22, 610: 9}):
             errors.append(f"unexpected camera image-count histogram: {dict(camera_histogram)}")
+        if len(geometry_by_camera) != 33 or len(set(geometry_by_camera.values())) != 33:
+            errors.append("expected 33 unique, camera-fixed geometry profiles")
         for pid, items in per_pid.items():
             if len(items) != 40 or len({int(r["local_camera"]) for r in items}) != 8:
                 errors.append(f"pid {pid}: expected 40 accepted images across 8 cameras")
+            yaw_counts = Counter(int(row.get("body_yaw_deg", 999)) for row in items)
+            if yaw_counts != Counter({degrees: 5 for degrees in BODY_YAW_DEGREES}):
+                errors.append(f"pid {pid}: expected five accepted images in every body-yaw bin")
             train_items = [row for row in items if row["split"] == "train"]
             queries = [row for row in items if row["split"] == "query"]
             galleries = [row for row in items if row["split"] == "gallery"]
@@ -1044,6 +1427,13 @@ def validate_synthetic_manifest(
                 errors.append(f"pid {pid}: expected 12 occluded train images")
             if queries and (len(queries) != 4 or not all(row.get("occluded") for row in queries)):
                 errors.append(f"pid {pid}: expected four occluded queries")
+            query_yaws = {
+                BODY_YAW_DEGREES.index(int(row.get("body_yaw_deg", 999)))
+                for row in queries
+                if int(row.get("body_yaw_deg", 999)) in BODY_YAW_DEGREES
+            }
+            if queries and (len(query_yaws) != 4 or len({index % 2 for index in query_yaws}) != 1):
+                errors.append(f"pid {pid}: query body yaws do not cover four separated quadrants")
             if galleries and (len(galleries) != 36 or any(row.get("occluded") for row in galleries)):
                 errors.append(f"pid {pid}: expected 36 clean gallery images")
             for query in (row for row in items if row["split"] == "query"):
@@ -1075,6 +1465,8 @@ def validate_synthetic_manifest(
                 and float(review.get("sample_fraction", 0)) >= 0.05
                 and bool(review.get("reviewed_all_boundary_cases"))
                 and float(review.get("identity_consistency_rate", 0)) >= 0.95
+                and float(review.get("camera_pitch_consistency_rate", 0)) >= 0.95
+                and int(review.get("camera_geometry_failures", 0)) == 0
                 and int(review.get("major_anatomy_failures", 0)) == 0
                 and int(review.get("text_logo_watermark_failures", 0)) == 0
             )

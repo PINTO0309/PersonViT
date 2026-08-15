@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import io
 import json
 import importlib
 import sys
@@ -29,9 +31,21 @@ from generate_synth_reid33 import (  # noqa: E402
     _refresh_and_collect,
     _prepare_retries,
     _repair_candidate_rank,
+    _sample_jobs,
+    _write_reference_asset,
     enforce_cost_ceiling,
     initialize,
+    repair_local,
     repair_pilot,
+    report_local_failures,
+)
+from probe_synth_reid33_reference_sizes import (  # noqa: E402
+    REFERENCE_VARIANTS,
+    STANDARD_PRICING,
+    _extract_usage,
+    _request_image,
+    _usage_cost,
+    prepare_references,
 )
 from evaluate_synth_reid33_adoption import evaluate_adoption  # noqa: E402
 from synth_reid33_core import (  # noqa: E402
@@ -44,7 +58,9 @@ from synth_reid33_core import (  # noqa: E402
     make_cameras,
     make_identities,
     make_pilot_samples,
+    make_rotation_pilot_samples,
     make_samples,
+    plate_prompt,
     _crop_resize_person,
     _nms_person_candidates,
     process_image,
@@ -52,7 +68,9 @@ from synth_reid33_core import (  # noqa: E402
     reconcile_batch_output,
     sha256_file,
     validate_pilot,
+    validate_camera_geometry,
     validate_plan,
+    validate_rotation_pilot,
     validate_synthetic_manifest,
 )
 
@@ -68,10 +86,156 @@ def config():
 def test_sample_generation_uses_cost_minimizing_portrait_size(config):
     assert config["model"]["api_id"] == "gpt-image-2"
     assert config["model"]["catalog_snapshot"] == "gpt-image-2-2026-04-21"
+    assert config["model"]["quality"] == "low"
     assert config["model"]["sample_size"] == "576x1152"
+    assert config["model"]["reference_profile"] == "native_quarter"
+    assert config["model"]["reference_anchor_size"] == "256x384"
+    assert config["model"]["reference_plate_size"] == "144x288"
     assert (config["dataset"]["final_width"], config["dataset"]["final_height"]) == (128, 256)
     assert config["dataset"]["bbox_margin"] == 0.05
     assert config["dataset"]["framing_fill_min"] == 0.85
+    assert config["prompt"]["version"] == "synth-reid33-prompt-v3-eight-yaw-camera-pitch"
+    assert config["qa"]["camera_pitch_consistency_min"] == 0.95
+    assert [view["degrees"] for view in config["body_rotation"]["views"]] == [
+        0, 45, 90, 135, 180, -135, -90, -45,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("kind", "source_size", "reference_size"),
+    [
+        ("anchor", (1024, 1536), (256, 384)),
+        ("plate", (576, 1152), (144, 288)),
+    ],
+)
+def test_native_quarter_reference_asset_preserves_source(
+    tmp_path, config, kind, source_size, reference_size
+):
+    source = tmp_path / f"{kind}-source.jpg"
+    reference = tmp_path / f"{kind}-reference.jpg"
+    Image.new("RGB", source_size, (90, 100, 110)).save(source, quality=95)
+    source_sha = sha256_file(source)
+
+    metadata = _write_reference_asset(source, reference, kind, config)
+
+    assert Image.open(source).size == source_size
+    assert sha256_file(source) == source_sha
+    assert Image.open(reference).size == reference_size
+    assert metadata["profile"] == "native_quarter"
+    assert metadata["reference_size"] == list(reference_size)
+    assert metadata["reference_sha256"] == sha256_file(reference)
+
+
+def test_asset_collection_uploads_native_quarter_copy(tmp_path, config):
+    paths = _paths(tmp_path)
+    paths["state"].mkdir(parents=True)
+    job = {
+        "custom_id": "asset-anchor-p000-front-a1",
+        "scope": "asset",
+        "kind": "anchor",
+        "asset_id": "anchor-p000-front",
+        "local_pid": 0,
+        "orientation": "front",
+        "status": "submitted",
+        "attempt": 1,
+        "body": {"quality": "low"},
+        "logical_refs": [],
+    }
+    atomic_write_jsonl(paths["jobs"], [job])
+    atomic_write_jsonl(paths["batches"], [{
+        "batch_id": "batch-a",
+        "status": "in_progress",
+        "custom_ids": [job["custom_id"]],
+    }])
+    buffer = io.BytesIO()
+    Image.new("RGB", (1024, 1536), (50, 60, 70)).save(buffer, format="JPEG")
+    payload = json.dumps({
+        "custom_id": job["custom_id"],
+        "response": {
+            "status_code": 200,
+            "request_id": "request-a",
+            "body": {
+                "model": "gpt-image-2",
+                "data": [{"b64_json": base64.b64encode(buffer.getvalue()).decode()}],
+            },
+        },
+    }).encode() + b"\n"
+
+    class FakeClient:
+        uploaded_size = None
+
+        def retrieve(self, _batch_id):
+            return {"id": "batch-a", "status": "completed", "output_file_id": "out-a"}
+
+        def content(self, _file_id):
+            return payload
+
+        def upload(self, path, purpose):
+            assert purpose == "vision"
+            self.uploaded_size = Image.open(path).size
+            return "file-native-quarter"
+
+    client = FakeClient()
+    _refresh_and_collect(client, tmp_path, config, paths)
+    asset = read_jsonl(paths["assets"])[0]
+
+    assert client.uploaded_size == (256, 384)
+    assert Image.open(tmp_path / asset["path"]).size == (1024, 1536)
+    assert Image.open(tmp_path / asset["reference_path"]).size == (256, 384)
+    assert asset["profile"] == "native_quarter"
+    assert asset["file_id"] == "file-native-quarter"
+
+
+def test_reference_size_probe_prepares_every_declared_variant(tmp_path):
+    source = tmp_path / "source" / "assets"
+    source.mkdir(parents=True)
+    Image.new("RGB", (1024, 1536), (90, 100, 110)).save(
+        source / "anchor-p000-front.jpg"
+    )
+    Image.new("RGB", (576, 1152), (120, 130, 140)).save(source / "plate-c00.jpg")
+
+    output = tmp_path / "probe"
+    rows = prepare_references(source.parent, output)
+
+    assert len(rows) == len(REFERENCE_VARIANTS) == 7
+    for row in rows:
+        assert Image.open(output / row["anchor_path"]).size == tuple(row["anchor_size"])
+        assert Image.open(output / row["plate_path"]).size == tuple(row["plate_size"])
+
+
+def test_reference_size_probe_usage_and_standard_cost():
+    usage = _extract_usage({
+        "usage": {
+            "input_tokens": 1100,
+            "input_tokens_details": {"text_tokens": 100, "image_tokens": 1000},
+            "output_tokens": 86,
+        }
+    })
+
+    assert usage["input_tokens_unclassified"] == 0
+    assert _usage_cost(usage, STANDARD_PRICING) == pytest.approx(0.01108)
+
+
+def test_reference_size_probe_uses_implicit_base64_response(tmp_path):
+    anchor = tmp_path / "anchor.jpg"
+    plate = tmp_path / "plate.jpg"
+    _save_image(anchor, (1, 2, 3))
+    _save_image(plate, (4, 5, 6))
+
+    class Images:
+        kwargs = None
+
+        def edit(self, **kwargs):
+            self.kwargs = kwargs
+            assert all(not image.closed for image in kwargs["image"])
+            return "response"
+
+    client = types.SimpleNamespace(images=Images())
+    assert _request_image(client, anchor, plate) == "response"
+    assert "response_format" not in client.images.kwargs
+    assert client.images.kwargs["output_format"] == "jpeg"
+    assert client.images.kwargs["quality"] == "low"
+    assert all(image.closed for image in client.images.kwargs["image"])
 
 
 def test_deterministic_full_allocation_meets_acceptance(config):
@@ -82,16 +246,87 @@ def test_deterministic_full_allocation_meets_acceptance(config):
     report = validate_plan(config, identities, cameras, samples)
 
     assert report["valid"], report["errors"]
+    assert report["camera_geometry"]["valid"]
     assert Counter(targets) == {120: 2, 121: 22, 122: 9}
     assert report["counts"] == {"train": 16000, "query": 400, "gallery": 3600}
     assert set(sample["global_camera"] for sample in samples) == set(range(33, 66))
+    assert report["body_yaw_counts"] == {
+        -135: 2500, -90: 2500, -45: 2500, 0: 2500,
+        45: 2500, 90: 2500, 135: 2500, 180: 2500,
+    }
+    for pid in range(500):
+        rows = [sample for sample in samples if sample["local_pid"] == pid]
+        assert Counter(row["body_yaw_deg"] for row in rows) == {
+            degrees: 5 for degrees in (0, 45, 90, 135, 180, -135, -90, -45)
+        }
+        queries = [row for row in rows if row["split"] == "query"]
+        if queries:
+            indices = {
+                (0, 45, 90, 135, 180, -135, -90, -45).index(row["body_yaw_deg"])
+                for row in queries
+            }
+            assert len(indices) == 4
+            assert len({index % 2 for index in indices}) == 1
 
 
-def test_pilot_has_192_candidates_and_covers_every_camera(config):
+def test_all_33_cameras_have_fixed_unique_pitch_height_and_horizon(config):
+    cameras = make_cameras(config)
+    assert cameras == make_cameras(config)
+    report = validate_camera_geometry(config, cameras)
+    assert report["valid"], report["errors"]
+    assert len({
+        (
+            camera["geometry"]["pitch_deg"],
+            camera["geometry"]["mounting_height_m"],
+            camera["geometry"]["horizon_y_fraction"],
+        )
+        for camera in cameras
+    }) == 33
+    for camera in cameras:
+        geometry = camera["geometry"]
+        assert geometry["version"] == "synth-reid33-camera-geometry-v1"
+        assert geometry["pitch_deg"] < 0
+        assert geometry["pitch_down_deg"] == -geometry["pitch_deg"]
+        assert 0.03 <= geometry["horizon_y_fraction"] <= 0.45
+        prompt = plate_prompt(camera, config)
+        assert f"{geometry['mounting_height_m']:.2f} meters" in prompt
+        assert f"{geometry['pitch_down_deg']:.2f} degrees" in prompt
+        assert f"{round(geometry['horizon_y_fraction'] * 100)}%" in prompt
+    tampered = json.loads(json.dumps(cameras))
+    tampered[0]["geometry"]["pitch_deg"] = 5.0
+    assert not validate_camera_geometry(config, tampered)["valid"]
+
+
+def test_pilot_has_96_low_candidates_and_covers_every_camera(config):
     pilot = make_pilot_samples(config, allocate_pilot_cameras(config))
     report = validate_pilot(pilot)
     assert report["valid"], report["errors"]
-    assert min(report["coverage_per_quality"].values()) >= 2
+    assert len(pilot) == 96
+    assert {sample["quality"] for sample in pilot} == {"low"}
+    assert min(report["camera_coverage"].values()) >= 2
+
+
+def test_rotation_pilot_is_low_only_balanced_and_uses_nearest_cardinal_anchor(config):
+    identities = make_identities(config)
+    cameras = make_cameras(config)
+    samples = make_rotation_pilot_samples(config, allocate_pilot_cameras(config))
+    report = validate_rotation_pilot(config, samples)
+
+    assert report["valid"], report["errors"]
+    assert len(samples) == 96
+    assert set(report["body_yaw_counts"].values()) == {12}
+    jobs = _sample_jobs(
+        config, samples, identities, cameras, "rotation_pilot", quality="low"
+    )
+    by_id = {sample["sample_id"]: sample for sample in samples}
+    cameras_by_id = {camera["local_camera"]: camera for camera in cameras}
+    for job in jobs:
+        sample = by_id[job["sample_id"]]
+        geometry = cameras_by_id[sample["local_camera"]]["geometry"]
+        assert job["quality"] == "low"
+        assert job["logical_refs"][0].endswith(f"-{sample['anchor_orientation']}")
+        assert f"yaw {sample['body_yaw_deg']:+d} degrees" in job["body"]["prompt"]
+        assert f"{geometry['pitch_down_deg']:.2f} degree downward tilt" in job["body"]["prompt"]
 
 
 def test_batch_results_are_reconciled_by_custom_id_not_order():
@@ -174,18 +409,21 @@ def test_real_similarity_calibration_excludes_gallery_only_distractor(tmp_path):
     assert set(by_domain) == {"d00"}
 
 
-def test_repair_candidate_rank_prefers_geometry_then_visibility():
+def test_repair_candidate_rank_prefers_geometry_then_visibility_then_first_attempt():
     failed = {"accepted": False, "pose_geometry": {"region_scores": {"head": 20}},
               "person_detection": {"principal_score": 0.999}}
     accepted_low = {"accepted": True, "pose_geometry": {"region_scores": {"head": 2}},
                     "person_detection": {"principal_score": 0.99}}
     accepted_high = {"accepted": True, "pose_geometry": {"region_scores": {"head": 5}},
                      "person_detection": {"principal_score": 0.95}}
-    assert _repair_candidate_rank({"quality": "medium", "attempt": 1}, failed) < _repair_candidate_rank(
-        {"quality": "low", "attempt": 1}, accepted_low
+    assert _repair_candidate_rank({"attempt": 1}, failed) < _repair_candidate_rank(
+        {"attempt": 1}, accepted_low
     )
-    assert _repair_candidate_rank({"quality": "low", "attempt": 1}, accepted_low) < _repair_candidate_rank(
-        {"quality": "medium", "attempt": 2}, accepted_high
+    assert _repair_candidate_rank({"attempt": 1}, accepted_low) < _repair_candidate_rank(
+        {"attempt": 2}, accepted_high
+    )
+    assert _repair_candidate_rank({"attempt": 2}, accepted_high) < _repair_candidate_rank(
+        {"attempt": 1}, accepted_high
     )
 
 
@@ -278,8 +516,8 @@ def test_repair_pilot_atomically_rebuilds_complete_manifest(tmp_path, config, mo
     repaired_attempts = read_jsonl(paths["attempts"])
 
     assert report["complete"]
-    assert report["selected"] == 192
-    assert len(manifest) == 192
+    assert report["selected"] == 96
+    assert len(manifest) == 96
     assert all(row["status"] == "succeeded" for row in repaired_jobs)
     assert all(row["selected_by_repair"] for row in repaired_attempts)
     assert all((tmp_path / row["final_path"]).is_file() for row in manifest)
@@ -353,6 +591,103 @@ def test_cost_ceiling_stops_before_next_batch():
     enforce_cost_ceiling(80.0, 10.0, 9.99, 100.0)
     with pytest.raises(PipelineError, match="cost stop"):
         enforce_cost_ceiling(80.0, 10.0, 10.01, 100.0)
+
+
+def test_automatic_api_retries_are_disabled(config):
+    assert config["batch"]["max_attempts"] == 1
+    assert config["batch"]["retry_reserve_fraction"] == 0.0
+    failed = [{
+        "custom_id": "rotation-pilot-x-a1",
+        "scope": "rotation_pilot",
+        "kind": "sample",
+        "sample_id": "x",
+        "status": "qa_failed",
+        "attempt": 1,
+        "body": {"quality": "low"},
+        "logical_refs": ["anchor", "plate"],
+    }]
+    assert _prepare_retries(failed, config, [], [], {}, {}, {}) == failed
+
+
+def test_local_repair_rebuilds_from_raw_without_creating_api_attempts(
+    tmp_path, config, monkeypatch
+):
+    import generate_synth_reid33 as generator
+
+    paths = initialize(tmp_path, config)
+    sample = read_jsonl(paths["rotation_pilot_samples"])[0]
+    custom_id = f"rotation_pilot-{sample['sample_id']}-a1"
+    refs = [f"anchor-p{sample['local_pid']:03d}-{sample['anchor_orientation']}",
+            f"plate-c{sample['local_camera']:02d}"]
+    job = {
+        "custom_id": custom_id,
+        "scope": "rotation_pilot",
+        "kind": "sample",
+        "sample_id": sample["sample_id"],
+        "status": "qa_failed",
+        "attempt": 1,
+        "quality": "low",
+        "logical_refs": refs,
+        "body": {"prompt": "eight-yaw prompt", "quality": "low"},
+    }
+    attempt = {
+        "custom_id": custom_id,
+        "classification": "succeeded",
+        "response_model": "gpt-image-2",
+        "request_id": "request-local",
+        "batch_id": "batch-local",
+        "usage": {},
+        "estimated_cost_usd": 0.01,
+    }
+    assets = [
+        {"asset_id": ref, "sha256": f"sha-{index}", "file_id": f"file-{index}"}
+        for index, ref in enumerate(refs)
+    ]
+    atomic_write_jsonl(paths["jobs"], [job])
+    atomic_write_jsonl(paths["attempts"], [attempt])
+    atomic_write_jsonl(paths["assets"], assets)
+    raw = tmp_path / "raw" / "rotation_pilot" / f"{custom_id}.jpg"
+    raw.parent.mkdir(parents=True)
+    raw.write_bytes(b"successful-api-raw")
+
+    def fake_process(raw_path, final_path, _camera, _sample, _config):
+        assert raw_path.read_bytes() == b"successful-api-raw"
+        Image.new("RGB", (128, 256), (12, 34, 56)).save(final_path, format="JPEG")
+        return {
+            "accepted": True,
+            "geometry_pass": True,
+            "processing_version": generator.PROCESSING_VERSION,
+            "person_detection": {"principal_score": 0.99},
+            "pose_geometry": {"region_scores": {"head": 5.0}},
+            "final_sha256": sha256_file(final_path),
+        }
+
+    monkeypatch.setattr(generator, "process_image", fake_process)
+    dry = repair_local(tmp_path, config, "rotation-pilot", dry_run=True)
+    assert dry["locally_repairable"] == 1
+    assert not paths["rotation_pilot_manifest"].exists()
+    assert raw.read_bytes() == b"successful-api-raw"
+
+    report = repair_local(tmp_path, config, "rotation-pilot")
+    manifest = read_jsonl(paths["rotation_pilot_manifest"])
+    final = tmp_path / manifest[0]["final_path"]
+    assert report["repaired"] == 1
+    assert report["remaining_unresolved"] == 95
+    rebuilt_bytes = final.read_bytes()
+    assert Image.open(final).size == (128, 256)
+    assert manifest[0]["selection"]["method"] == "local_raw_reprocess"
+    assert manifest[0]["camera_geometry"]["version"] == "synth-reid33-camera-geometry-v1"
+    assert len(read_jsonl(paths["attempts"])) == 1
+
+    final.write_bytes(b"corrupt")
+    repaired_again = repair_local(tmp_path, config, "rotation-pilot")
+    assert repaired_again["repaired"] == 1
+    assert final.read_bytes() == rebuilt_bytes
+    failures = report_local_failures(tmp_path, config, "rotation-pilot", limit=10)
+    assert failures["valid_final_images"] == 1
+    assert failures["automatic_api_retries"] == 0
+    assert failures["awaiting_first_attempt"] == 95
+    assert failures["failed_without_successful_raw"] == 0
 
 
 def test_approval_requires_every_pilot_gate(config):

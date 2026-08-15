@@ -246,7 +246,9 @@ The gated generator in
 [`tools/generate_synth_reid33.py`](transreid_pytorch/tools/generate_synth_reid33.py)
 plans 500 fictional adult identities across 33 synthetic cameras. It produces
 16,000 train, 400 occluded query, and 3,600 clean gallery images only after a
-192-image pilot passes automatic and manual QA. Batch requests are locked to
+96-image quality pilot and a 96-image body-rotation pilot pass automatic and
+manual QA. Every image request, including identity anchors and camera plates,
+is locked to `quality=low`. Batch requests are also locked to
 the supported `gpt-image-2` family alias, while the catalog snapshot
 `gpt-image-2-2026-04-21` is recorded separately for provenance. There is no
 automatic fallback to another model family, and the API key is read only from
@@ -262,9 +264,27 @@ python tools/generate_synth_reid33.py pilot --dry-run
 
 The dry run writes deterministic identities, camera profiles, all 20,000
 sample specifications, and dependency-annotated Batch JSONL without making an
-API request. A live pilot is advanced by rerunning the resume command: first
+API request. Each of the 33 cameras has a seed-locked mounting height, downward
+pitch, focal length, and derived horizon/eye-level vanishing-line position.
+The three view families use distinct ranges: high-wide cameras look down by
+about 20–28 degrees, diagonal-medium cameras by about 7–12 degrees, and
+telephoto-exit cameras by about 1.5–4.5 degrees. Exact values are written to
+`state/cameras.jsonl`, generation prompts, plate metadata, and every sample
+manifest row. A live pilot is advanced by rerunning the resume command: first
 front anchors and 33 empty camera plates, then three edited identity views,
-then the low/medium pilot candidates.
+then the 96 Low pilot candidates.
+
+An output root initialized with an older prompt/config is intentionally not
+migrated because its existing plates may not encode this geometry, its
+reference assets may have been generated above Low quality, or its samples may
+have used the previous full-resolution reference profile. Keep that root as an
+archive and pass a new `--root` for the Low-only native-quarter pilot.
+
+```shell
+export SYNTH_CAMERA_PITCH_ROOT="$PWD/data/SyntheticReID33_pilot_low_camera_pitch_v4"
+python tools/generate_synth_reid33.py \
+  --root "$SYNTH_CAMERA_PITCH_ROOT" pilot --dry-run
+```
 
 ```shell
 export OPENAI_API_KEY=...       # never written to state or manifests
@@ -279,7 +299,7 @@ python tools/generate_synth_reid33.py report
 
 `repair-pilot` reprocesses every successful raw candidate with the official
 TorchVision SSDLite person detector and Keypoint R-CNN pose model, then chooses
-one accepted candidate for each of the 192 pilot specifications. This avoids
+one accepted candidate for each of the 96 Low pilot specifications. This avoids
 paying for retries caused by OpenCV HOG false positives. The first invocation
 downloads and caches the official model weights. The command refuses to change
 the pilot manifest while a Batch is active or completed but not yet collected;
@@ -288,6 +308,11 @@ recoverability without changing final images, manifests, jobs, or attempts.
 All pilot and full samples share the same framing policy: crop the detected
 person bounding box with 5% margin, require at least 85% bbox fill on both
 axes, and directly resize that crop to 128x256 like the real ReID inputs.
+Full samples also use eight camera-relative body-yaw bins at 45-degree
+intervals. Every identity has exactly five images in each yaw bin. The four
+occluded queries of each test identity are separated by 90 degrees, while the
+existing front/left/right/back anchors are reused to avoid extra reference
+generation cost.
 
 Before `qa`, measure the real-data cross-camera positive 5-percentile
 calibration for both ONNX models. The command uses every same-PID,
@@ -309,11 +334,31 @@ hash, preprocessing contract, and pair counts. Its minimum interface is:
 }
 ```
 
-Inspect `qa/pilot_contact_sheet.jpg`, copy
+Inspect both `qa/pilot_contact_sheet.jpg` and the uncropped 33-camera geometry
+sheet `qa/camera_pitch_contact_sheet.jpg`, copy
 `qa/manual_review.template.json` to `qa/manual_review.json`, record the manual
-review, and rerun `report`. Full generation remains locked unless every gate
-passes, both qualities have measured usage, the chosen forecast fits the USD
-ceiling, and the report/config hashes still match:
+review including `camera_pitch_consistency_rate >= 0.95` and zero
+`camera_geometry_failures`, and rerun `report`. The image model is guided by
+explicit camera pose but cannot guarantee an exact photogrammetric angle, so
+this plate review is a fail-closed manual gate. Full generation remains locked
+unless every gate passes. Before approval, run the Low-only body-rotation pilot,
+which reuses the existing 81 anchor/plate assets and has a hard USD 2.00 scope
+ceiling:
+
+```shell
+python tools/generate_synth_reid33.py rotation-pilot --dry-run
+python tools/generate_synth_reid33.py rotation-pilot --resume
+# Rerun --resume after Batch completion to collect the result; it will not retry.
+python tools/generate_synth_reid33.py rotation-pilot --resume
+python tools/generate_synth_reid33.py qa --scope rotation-pilot
+```
+
+Inspect `qa/rotation_pilot_contact_sheet.jpg`, copy
+`rotation_pilot/manual_review.template.json` to
+`rotation_pilot/manual_review.json`, record the labeled-yaw and identity review,
+then rerun `report`. Approval requires at least 90% yaw accuracy, 95% identity
+consistency, all embedding/geometry gates, measured Low usage, a forecast
+within the USD ceiling, and unchanged report/config hashes:
 
 ```shell
 python tools/generate_synth_reid33.py approve --quality low --max-usd 500
@@ -323,15 +368,62 @@ python tools/generate_synth_reid33.py full --resume
 python tools/generate_synth_reid33.py qa --scope full
 ```
 
-Each resume call polls existing Batch IDs and submits only newly unblocked or
-retryable jobs. Results are matched by `custom_id`, low-quality QA failures are
-promoted to medium, user-correctable image errors receive one neutral prompt
-revision, attempts stop at three, and no next batch is submitted if its
-conservative projected cost exceeds the approved ceiling.
+Each resume call polls existing Batch IDs and submits only newly unblocked
+first attempts. Results are matched by `custom_id`; automatic API retries,
+prompt-revision resubmissions, and retry cost reserve are all disabled. A
+successful API raw response is retained even when local geometry QA fails.
+Derived images can be audited and rebuilt from those raw files without an API
+request:
+
+```shell
+python tools/generate_synth_reid33.py repair-local \
+  --scope rotation-pilot --dry-run
+python tools/generate_synth_reid33.py repair-local \
+  --scope rotation-pilot
+python tools/generate_synth_reid33.py report-failures \
+  --scope rotation-pilot
+```
+
+The same commands accept `--scope pilot` and `--scope full`. Local repair can
+restore missing/corrupt final JPEGs, deterministic camera processing, QA, and
+manifest rows. It cannot recover an API request that returned no image or fix
+wrong identity, anatomy, body yaw, or camera perspective in the raw image. Such
+samples remain unresolved and block release rather than triggering paid
+generation.
+
+Production is locked to the empirically selected `native_quarter` reference
+profile. Anchor and camera-plate generation outputs are retained at 1024x1536
+and 576x1152 respectively, then deterministically downsampled with Lanczos to
+256x384 and 144x288 JPEGs before their `vision` upload. Only these smaller
+copies are used as Image Edit inputs; the generated originals remain available
+under `assets/` for audit and local reprocessing. The selected profile reduced
+image-input tokens by 75% in the reference-size probe.
+
+The isolated probe below reproduces that selection. It creates seven proxy
+pairs from the same existing PID 0 anchor and camera 0 plate, then sends exactly
+one synchronous Low Image Edit per pair at a fixed 576x1152 output. It performs
+no automatic retry and cannot add its outputs to the training dataset:
+
+```shell
+export SYNTH_REF_PROBE_ROOT="$PWD/data/SyntheticReID33_reference_size_probe"
+python tools/probe_synth_reid33_reference_sizes.py \
+  --root "$SYNTH_REF_PROBE_ROOT" prepare
+export OPENAI_API_KEY=...       # required only for run
+python tools/probe_synth_reid33_reference_sizes.py \
+  --root "$SYNTH_REF_PROBE_ROOT" run --max-usd 0.20
+python tools/probe_synth_reid33_reference_sizes.py \
+  --root "$SYNTH_REF_PROBE_ROOT" report
+```
+
+`report.json` records acceptance, input/output token usage, actual Standard API
+cost, Batch-equivalent cost, 20,000-request projection, detector/pose QA, and
+ViT/OSNet similarity for every resolution. Review `contact_sheet.jpg` before
+auditing the production reference size; one stochastic output per condition is
+a cost probe, not a statistically strong quality evaluation.
 
 Full QA runs both ONNX models over all samples, records d05-only Rank-1/mAP as
-a label-quality diagnostic, rejects identity/margin/pHash failures for bounded
-replacement, and creates five contact sheets containing a PID/occlusion
+a label-quality diagnostic, rejects identity/margin/pHash failures without
+automatically resubmitting them, and creates five contact sheets containing a PID/occlusion
 stratified 5% sample. Copy `qa/full_review.template.json` to
 `qa/full_review.json` after reviewing those sheets and every automatic boundary
 case. The standalone validator will not release the dataset without both the
