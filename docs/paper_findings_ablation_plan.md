@@ -590,11 +590,28 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   Config `osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed.yml`: rep arch,
   warm start rep best 88.280 (unfolded), EMBED_WEIGHT 2.0 first probe,
   representable no-cam teacher ONLY (L_cam pairing forbidden — 0.77
-  floor pressure). Expect an early Distill spike while the random
-  projector aligns. Judge vs 88.280 / 0.494.
-- Queued next per the round plan: rep rollout to N/T (proven +0.17 on
-  P), ViT-S-as-teacher TA arm (config only), dual-teacher
-  partial-L_cam rel-KD (small code).
+  floor pressure). **GATE PASSED (+0.31): best 88.591** (e38) — P
+  record again, ladder total +0.45 over the old 88.145. The predicted
+  e1 Distill spike (2.11) resolved by e5 (0.665); terminal combined
+  Distill 0.533 (includes the 2.0-weighted embed term, not comparable
+  to rep's rel+logit-only 0.494). Folded (3.1e-6) to folded_best.pth;
+  probe: clean 88.59 post-fold, jpeg-q20 −2.19 / q40 −0.67 / warm
+  −8.37 / mean-8 3.22 — every condition at or better than rep (−2.37 /
+  3.34), robustness gate PASSED. Reading: the batch-local relational
+  loss was NOT carrying each sample's absolute position in teacher
+  space — the projector hint adds real signal where GeM (+0.007) found
+  nothing. Follow-ups: EMBED_WEIGHT 5.0 probe, then N/T rollout of the
+  proven rep+embed recipe.
+- **N/T rollout (ready)**: `osnet_ain_x1_25_rep` / `osnet_ain_x1_5_rep`
+  factories + `osnet_{n,t}_8gb_distill_ain_jpeg_rep_embed.yml` —
+  deliberately COMBINED arms (teacher swap to no-cam jpeg + rep + embed
+  KD in one run each; attribution was established on P: parity −0.04 /
+  +0.17 / +0.31). Warm starts = tier jpeg bests (N 88.445 / T 88.694),
+  function preservation verified at 0.0 for both. Judge: clean vs the
+  tier best, probe non-regression on folded weights.
+- Queued next per the round plan: EMBED_WEIGHT 5.0 probe on P,
+  ViT-S-as-teacher TA arm (config only), dual-teacher partial-L_cam
+  rel-KD (small code).
 
 ## Measurement checklist per arm
 

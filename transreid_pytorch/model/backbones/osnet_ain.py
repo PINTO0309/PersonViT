@@ -478,6 +478,17 @@ def osnet_ain_x1_0_rep(**kwargs):
     return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512, rep=True)
 
 
+def osnet_ain_x1_25_rep(**kwargs):
+    # rep rollout to the N tier (recipe proven on P: +0.17 clean at zero
+    # inference cost); fold with tools/fold_rep.py -> plain osnet_ain_x1_25
+    return OSNetAIN(channels=(80, 320, 480, 640), feature_dim=512, rep=True)
+
+
+def osnet_ain_x1_5_rep(**kwargs):
+    # rep rollout to the T tier; fold -> plain osnet_ain_x1_5
+    return OSNetAIN(channels=(96, 384, 576, 768), feature_dim=512, rep=True)
+
+
 def osnet_ain_x1_0_gem(**kwargs):
     # GeM pooling on the plain architecture (fallback branch if the rep
     # arm fails its gate); also the fold target for rep_gem checkpoints
