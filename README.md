@@ -620,7 +620,7 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 | S-ain-aug | ViT-S/16<br>+<br>token-IN | 22.0M | 2.94 | 384 | 93.0 | 96.9 | 98.2 | 98.5 |
 | T-ain-aug | OSNet-AIN x1.5 | 4.6M | 2.12 | 512 | 88.7 | 95.2 | 97.3 | 97.9 |
 | N-ain-aug | OSNet-AIN x1.25 | 3.3M | 1.49 | 512 | 88.4 | 94.9 | 97.3 | 98.0 |
-| P-ain-aug | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 88.1 | 94.9 | 97.4 | 98.1 |
+| P-ain-aug | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 88.6 | 95.2 | 97.5 | 98.1 |
 
 - The retired ViT student candidates and their measured results are recorded in [`docs/lightweight_students.md`](docs/lightweight_students.md).
 - B-ain is the teacher of the domain-generalization (`-ain`) ladder   ([`docs/ain_variants.md`](docs/ain_variants.md)): token-axis instance normalization after the patch embedding, trained with the B recipe over 75 epochs (the token-IN insertion costs a few adaptation epochs and, at convergence, 1.2 mAP of in-distribution accuracy versus B — the accepted price of style invariance).
@@ -739,33 +739,33 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
 
   | Var | Backbone | Params | GFLOPs<br>@256x128 | Emb | mAP | Rank-1 | Rank-5 | Rank-10 |
   | --- | --- | ---: | ---: | ---: | --- | ---: | ---: | ---: |
-  | P-ain-aug | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 88.1 | 94.9 | 97.4 | 98.1 |
+  | P-ain-aug | OSNet-AIN x1.0 | 2.2M | 0.98 | 512 | 88.6 | 95.2 | 97.5 | 98.1 |
 
 - official dataset eval
 
   | dataset | queries | gallery | mAP | R1 | R5 | R10 |
   | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-  | market | 3,368 | 15,913 | 0.9642 | 0.9855 | 0.9961 | 0.9979 |
-  | msmt17 | 11,659 | 82,161 | 0.8537 | 0.9396 | 0.9756 | 0.9807 |
-  | duke_occ | 2,210 | 17,661 | 0.8837 | 0.9226 | 0.9683 | 0.9787 |
-  | cuhk03np | 1,400 | 5,332 | 0.9752 | 0.9807 | 0.9936 | 0.9979 |
-  | occ_reid | 1,000 | 1,000 | 0.9831 | 0.9850 | 0.9940 | 0.9970 |
+  | market | 3,368 | 15,913 | 0.9687 | 0.9857 | 0.9955 | 0.9973 |
+  | msmt17 | 11,659 | 82,161 | 0.8655 | 0.9458 | 0.9762 | 0.9815 |
+  | duke_occ | 2,210 | 17,661 | 0.9002 | 0.9335 | 0.9729 | 0.9796 |
+  | cuhk03np | 1,400 | 5,332 | 0.9785 | 0.9843 | 0.9921 | 0.9971 |
+  | occ_reid | 1,000 | 1,000 | 0.9848 | 0.9880 | 0.9940 | 0.9970 |
 
 - official dataset style-shift eval - query only shifted
 
   | condition | mAP | R1 | dmAP | dR1 |
   | --- | ---: | ---: | ---: | ---: |
-  | clean | 0.8929 | 0.9514 | — | — |
-  | bright+30% | 0.8883 | 0.9487 | -0.0046 | -0.0026 |
-  | dark-30% | 0.8915 | 0.9497 | -0.0014 | -0.0016 |
-  | contrast-40% | 0.8929 | 0.9513 | -0.0000 | -0.0001 |
-  | contrast+40% | 0.7974 | 0.8635 | -0.0955 | -0.0879 |
-  | warm | 0.7918 | 0.8670 | -0.1011 | -0.0843 |
-  | cool | 0.8176 | 0.8930 | -0.0753 | -0.0584 |
-  | gamma0.6 | 0.8720 | 0.9393 | -0.0209 | -0.0121 |
-  | gamma1.6 | 0.8544 | 0.9264 | -0.0384 | -0.0250 |
-  | jpeg-q40 | 0.8831 | 0.9455 | -0.0098 | -0.0059 |
-  | jpeg-q20 | 0.8576 | 0.9248 | -0.0353 | -0.0266 |
+  | clean | 0.9012 | 0.9562 | — | — |
+  | bright+30% | 0.8973 | 0.9534 | -0.0039 | -0.0028 |
+  | dark-30% | 0.8998 | 0.9552 | -0.0015 | -0.0010 |
+  | contrast-40% | 0.9012 | 0.9562 | +0.0000 | +0.0000 |
+  | contrast+40% | 0.8104 | 0.8742 | -0.0908 | -0.0820 |
+  | warm | 0.8065 | 0.8775 | -0.0947 | -0.0787 |
+  | cool | 0.8316 | 0.9014 | -0.0696 | -0.0548 |
+  | gamma0.6 | 0.8824 | 0.9447 | -0.0188 | -0.0115 |
+  | gamma1.6 | 0.8643 | 0.9306 | -0.0370 | -0.0256 |
+  | jpeg-q40 | 0.8937 | 0.9506 | -0.0076 | -0.0056 |
+  | jpeg-q20 | 0.8714 | 0.9346 | -0.0298 | -0.0216 |
 
 #### osnet_ain_ms_d_c - 2.2M
 

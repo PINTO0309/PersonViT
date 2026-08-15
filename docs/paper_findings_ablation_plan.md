@@ -600,8 +600,13 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   3.34), robustness gate PASSED. Reading: the batch-local relational
   loss was NOT carrying each sample's absolute position in teacher
   space — the projector hint adds real signal where GeM (+0.007) found
-  nothing. Follow-ups: EMBED_WEIGHT 5.0 probe, then N/T rollout of the
-  proven rep+embed recipe.
+  nothing. Officials (folded weights): all five splits improved vs the
+  old P best — market .9642→.9687, msmt17 .8537→.8655, duke_occ
+  .8837→.9002, cuhk03np .9752→.9785, occ_reid .9831→.9848 — the
+  official-split agreement gate PASSED; README P-ain-aug rows and both
+  P section tables updated to the rep_embed folded best (88.6 / 95.2 /
+  97.5 / 98.1). ONNX flagship re-export still pending. Follow-ups:
+  EMBED_WEIGHT 5.0 probe, N/T rollout (running).
 - **N/T rollout (ready)**: `osnet_ain_x1_25_rep` / `osnet_ain_x1_5_rep`
   factories + `osnet_{n,t}_8gb_distill_ain_jpeg_rep_embed.yml` —
   deliberately COMBINED arms (teacher swap to no-cam jpeg + rep + embed
