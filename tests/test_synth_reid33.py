@@ -45,7 +45,7 @@ from synth_reid33_core import (  # noqa: E402
     make_identities,
     make_pilot_samples,
     make_samples,
-    _crop_pad_person,
+    _crop_resize_person,
     _nms_person_candidates,
     process_image,
     read_jsonl,
@@ -70,6 +70,8 @@ def test_sample_generation_uses_cost_minimizing_portrait_size(config):
     assert config["model"]["catalog_snapshot"] == "gpt-image-2-2026-04-21"
     assert config["model"]["sample_size"] == "576x1152"
     assert (config["dataset"]["final_width"], config["dataset"]["final_height"]) == (128, 256)
+    assert config["dataset"]["bbox_margin"] == 0.05
+    assert config["dataset"]["framing_fill_min"] == 0.85
 
 
 def test_deterministic_full_allocation_meets_acceptance(config):
@@ -130,17 +132,19 @@ def test_person_nms_suppresses_nested_duplicate_but_keeps_independent_person():
     assert _nms_person_candidates(boxes, scores) == [0, 2]
 
 
-def test_person_crop_expands_real_context_instead_of_reflecting_subject():
+def test_person_crop_uses_five_percent_tight_box_and_direct_reid_resize():
     import numpy as np
 
     image = np.zeros((100, 100, 3), dtype=np.uint8)
     image[20:80, 45:55] = (0, 0, 255)
-    crop = _crop_pad_person(image, (45, 20, 10, 60), margin=0.1)
+    crop, framing = _crop_resize_person(image, (45, 20, 10, 60), margin=0.05)
 
     assert crop.shape == (256, 128, 3)
-    assert not crop[:, :8, 2].any()
-    assert not crop[:, -8:, 2].any()
-    assert crop[:, 48:80, 2].any()
+    assert framing["policy"] == "tight_bbox_direct_resize"
+    assert framing["crop_box"] == [44, 17, 56, 83]
+    assert framing["bbox_width_fill"] == pytest.approx(10 / 12)
+    assert framing["bbox_height_fill"] == pytest.approx(60 / 66)
+    assert crop[:, :4, 2].mean() < crop[:, 12:116, 2].mean()
 
 
 def test_real_similarity_calibration_excludes_gallery_only_distractor(tmp_path):

@@ -285,6 +285,9 @@ downloads and caches the official model weights. The command refuses to change
 the pilot manifest while a Batch is active or completed but not yet collected;
 run `pilot --resume` once more in that case. `--dry-run` verifies complete
 recoverability without changing final images, manifests, jobs, or attempts.
+All pilot and full samples share the same framing policy: crop the detected
+person bounding box with 5% margin, require at least 85% bbox fill on both
+axes, and directly resize that crop to 128x256 like the real ReID inputs.
 
 Before `qa`, measure the real-data cross-camera positive 5-percentile
 calibration for both ONNX models. The command uses every same-PID,

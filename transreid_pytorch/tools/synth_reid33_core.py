@@ -25,7 +25,7 @@ except ImportError as exc:  # pragma: no cover - exercised by CLI preflight
 
 
 SCHEMA_VERSION = "synth-reid33/v1"
-PROCESSING_VERSION = "synth-reid33-isp-v3-context-crop-torchvision-qa"
+PROCESSING_VERSION = "synth-reid33-isp-v4-tight-crop-torchvision-qa"
 SPLITS = ("train", "query", "gallery")
 PERSON_SCORE_MIN = 0.35
 PERSON_NMS_IOU = 0.35
@@ -808,70 +808,41 @@ def _pose_geometry(
     }
 
 
-def _crop_pad_person(image: Any, bbox: tuple[int, int, int, int] | None, margin: float) -> Any:
+def _crop_resize_person(
+    image: Any, bbox: tuple[int, int, int, int] | None, margin: float
+) -> tuple[Any, dict[str, Any]]:
+    """Tightly crop the detected person and resize like standard ReID inputs."""
     import cv2
-    import numpy as np
 
     height, width = image.shape[:2]
     if bbox is None:
         # The fallback is deterministic and deliberately fails geometry QA.
         crop_width = min(width, round(height * 0.58))
         x0 = max(0, (width - crop_width) // 2)
-        crop = image[:, x0 : x0 + crop_width]
+        x1, y0, y1 = x0 + crop_width, 0, height
+        framing = {
+            "policy": "tight_bbox_direct_resize",
+            "crop_box": [x0, y0, x1, y1],
+            "bbox_width_fill": 0.0,
+            "bbox_height_fill": 0.0,
+            "margin": margin,
+        }
     else:
         x, y, w, h = bbox
-        x0 = float(x - w * margin)
-        x1 = float(x + w * (1 + margin))
-        y0 = float(y - h * margin)
-        y1 = float(y + h * (1 + margin))
-
-        # Expand the crop into real surrounding image content before padding.
-        # Reflect-padding a tight person crop mirrors limbs, bags, or even the
-        # whole subject at the output edges and creates invalid ReID samples.
-        crop_width = x1 - x0
-        crop_height = y1 - y0
-        if crop_width < crop_height / 2:
-            extra = crop_height / 2 - crop_width
-            x0 -= extra / 2
-            x1 += extra / 2
-        elif crop_height < crop_width * 2:
-            extra = crop_width * 2 - crop_height
-            y0 -= extra / 2
-            y1 += extra / 2
-
-        def fit_interval(start: float, end: float, limit: int) -> tuple[int, int]:
-            length = end - start
-            if length >= limit:
-                return 0, limit
-            if start < 0:
-                end -= start
-                start = 0
-            if end > limit:
-                start -= end - limit
-                end = limit
-            return max(0, math.floor(start)), min(limit, math.ceil(end))
-
-        x0, x1 = fit_interval(x0, x1, width)
-        y0, y1 = fit_interval(y0, y1, height)
-        crop = image[y0:y1, x0:x1]
-    ch, cw = crop.shape[:2]
-    desired_width = ch / 2
-    desired_height = cw * 2
-    border = np.concatenate((crop[0], crop[-1], crop[:, 0], crop[:, -1]), axis=0)
-    border_color = tuple(int(value) for value in np.median(border, axis=0))
-    if cw < desired_width:
-        total = math.ceil(desired_width - cw)
-        crop = cv2.copyMakeBorder(
-            crop, 0, 0, total // 2, total - total // 2,
-            cv2.BORDER_CONSTANT, value=border_color,
-        )
-    elif ch < desired_height:
-        total = math.ceil(desired_height - ch)
-        crop = cv2.copyMakeBorder(
-            crop, total // 2, total - total // 2, 0, 0,
-            cv2.BORDER_CONSTANT, value=border_color,
-        )
-    return cv2.resize(crop, (128, 256), interpolation=cv2.INTER_AREA).astype(np.float32)
+        x0 = max(0, math.floor(x - w * margin))
+        x1 = min(width, math.ceil(x + w * (1 + margin)))
+        y0 = max(0, math.floor(y - h * margin))
+        y1 = min(height, math.ceil(y + h * (1 + margin)))
+        framing = {
+            "policy": "tight_bbox_direct_resize",
+            "crop_box": [x0, y0, x1, y1],
+            "bbox_width_fill": float(w / max(x1 - x0, 1)),
+            "bbox_height_fill": float(h / max(y1 - y0, 1)),
+            "margin": margin,
+        }
+    crop = image[y0:y1, x0:x1]
+    resized = cv2.resize(crop, (128, 256), interpolation=cv2.INTER_AREA)
+    return resized, framing
 
 
 def _motion_kernel(length: float, angle_degrees: float) -> Any:
@@ -933,19 +904,31 @@ def process_image(
     angle = (int(sample["generation_seed"]) % 41) - 20
     kernel = _motion_kernel(float(isp["motion_blur_px"]), angle)
     bgr = cv2.filter2D(bgr, -1, kernel)
-    bgr = _crop_pad_person(bgr, bbox, float(config["dataset"]["bbox_margin"])).astype(np.uint8)
+    bgr, framing = _crop_resize_person(
+        bgr, bbox, float(config["dataset"]["bbox_margin"])
+    )
+    bgr = bgr.astype(np.uint8)
     final_path.parent.mkdir(parents=True, exist_ok=True)
     ok = cv2.imwrite(str(final_path), bgr, [cv2.IMWRITE_JPEG_QUALITY, int(isp["jpeg_quality"])])
     if not ok:
         return {"decode": True, "accepted": False, "reason": "jpeg_write_failed"}
     principal_person_detected = bbox is not None and person_count == 1
-    geometry = principal_person_detected and bool(pose_geometry["pass"])
+    framing_min = float(config["dataset"]["framing_fill_min"])
+    framing["minimum_bbox_fill"] = framing_min
+    framing["pass"] = (
+        bbox is not None
+        and float(framing["bbox_width_fill"]) >= framing_min
+        and float(framing["bbox_height_fill"]) >= framing_min
+    )
+    geometry = principal_person_detected and bool(pose_geometry["pass"]) and bool(framing["pass"])
     if bbox is None:
         reason = "person_not_detected"
     elif person_count != 1:
         reason = "multiple_people_detected"
     elif not pose_geometry["pass"]:
         reason = str(pose_geometry.get("reason") or "required_landmarks_not_visible")
+    elif not framing["pass"]:
+        reason = "person_framing_out_of_range"
     else:
         reason = None
     return {
@@ -957,6 +940,7 @@ def process_image(
         "person_detection": detection,
         "principal_person_detected": principal_person_detected,
         "pose_geometry": pose_geometry,
+        "framing": framing,
         "geometry_pass": geometry,
         "processing_version": PROCESSING_VERSION,
         "processing_seed": int(sample["generation_seed"]),
@@ -1025,6 +1009,13 @@ def validate_synthetic_manifest(
         if actual_sha in seen_sha:
             errors.append(f"{sample_id}: duplicate image SHA-256")
         seen_sha.add(actual_sha)
+        framing = row.get("qa", {}).get("framing", {})
+        if not framing.get("pass"):
+            errors.append(f"{sample_id}: tight-crop framing QA did not pass")
+        if framing.get("policy") != "tight_bbox_direct_resize":
+            errors.append(f"{sample_id}: unexpected framing policy")
+        if row.get("processing_version") != PROCESSING_VERSION:
+            errors.append(f"{sample_id}: processing version is not {PROCESSING_VERSION}")
         pid = int(row.get("local_pid", -1))
         camera = int(row.get("local_camera", -1))
         if not 0 <= pid < 500 or not 0 <= camera < 33:

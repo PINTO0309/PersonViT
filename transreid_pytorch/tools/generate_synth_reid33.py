@@ -786,6 +786,7 @@ def build_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
         "expected_images": 192,
         "decode_rate": sum(bool(row.get("qa", {}).get("decode")) for row in rows) / 192,
         "geometry_rate": sum(bool(row.get("qa", {}).get("geometry_pass")) for row in rows) / 192,
+        "framing_rate": sum(bool(row.get("qa", {}).get("framing", {}).get("pass")) for row in rows) / 192,
         "sha_unique": len({row.get("final_sha256") for row in rows}) == len(rows),
     }
     near_pairs = 0
@@ -826,6 +827,7 @@ def build_report(root: Path, config: Mapping[str, Any]) -> dict[str, Any]:
         "image_count": len(rows) == 192,
         "decode": automatic["decode_rate"] >= float(thresholds["decode_rate_min"]),
         "geometry": automatic["geometry_rate"] >= float(thresholds["geometry_rate_min"]),
+        "framing": automatic["framing_rate"] >= float(thresholds["geometry_rate_min"]),
         "unique_sha": automatic["sha_unique"],
         "phash_duplicates": automatic["phash_near_duplicate_rate"]
         < float(thresholds["phash_near_duplicate_rate_max"]),

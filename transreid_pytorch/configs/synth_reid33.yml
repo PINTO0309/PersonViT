@@ -35,7 +35,8 @@ dataset:
     total: 20000
   final_width: 128
   final_height: 256
-  bbox_margin: 0.10
+  bbox_margin: 0.05
+  framing_fill_min: 0.85
 
 allocation:
   seed: 20260815
