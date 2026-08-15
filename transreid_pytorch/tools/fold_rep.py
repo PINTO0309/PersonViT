@@ -70,16 +70,21 @@ def main():
         import os
         import sys
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from model.backbones.osnet_ain import osnet_ain_x1_0, osnet_ain_x1_0_rep
+        from model.backbones.osnet_ain import (osnet_ain_x1_0, osnet_ain_x1_0_gem,
+                                               osnet_ain_x1_0_rep,
+                                               osnet_ain_x1_0_rep_gem)
 
         def backbone_state(full, model):
             wanted = model.state_dict()
             return {k.replace('base.', '', 1): v for k, v in full.items()
                     if k.replace('base.', '', 1) in wanted}
 
-        rep_model = osnet_ain_x1_0_rep().eval()
+        gem = any(k.endswith('global_avgpool.p') for k in state)
+        rep_factory = osnet_ain_x1_0_rep_gem if gem else osnet_ain_x1_0_rep
+        plain_factory = osnet_ain_x1_0_gem if gem else osnet_ain_x1_0
+        rep_model = rep_factory().eval()
         rep_model.load_state_dict(backbone_state(state, rep_model), strict=False)
-        plain = osnet_ain_x1_0().eval()
+        plain = plain_factory().eval()
         plain.load_state_dict(backbone_state(folded, plain), strict=False)
         x = torch.randn(4, 3, 256, 128)
         with torch.no_grad():

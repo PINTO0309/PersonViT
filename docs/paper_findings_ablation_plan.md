@@ -543,7 +543,17 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   0.73%) scores **88.24 / R1 95.0** on the unified split — +0.10 over
   the best member for zero training. Probe + officials gates still
   needed before any README adoption; N-member extension open.
-- **Rep overparameterization (designed, ready)**:
+- **Rep overparameterization — GATE PASSED (+0.17)**: best **88.28**
+  (e40) vs the 88.106 warm start, terminal rel-KD 0.494 (vs 0.502) —
+  new P clean record (previous overall best 88.145). e1 held 88.1
+  (function preservation confirmed in vivo); the learned rep branches
+  settled at ~28% of the dw3x3 center-tap magnitude before folding.
+  Folded exactly (fold_rep --verify 2.7e-6) to
+  `logs/.../folded_best.pth`. Probe (folded weights): clean 88.28
+  confirmed post-fold; jpeg-q20 −2.37 / q40 −0.70 / mean-8 3.34 — every
+  condition at or better than the parent (−2.45 / 3.39), robustness
+  gate PASSED. Officials deferred to the ladder end (run once after the
+  GeM/embed steps settle the final P). Design details:
   `osnet_ain_x1_0_rep` + `osnet_p_8gb_distill_ain_aug3_jpeg_rep.yml` —
   all 60 LightConv depthwise 3x3s train with two zero-init linear
   branches (dw 1x1 + per-channel identity scale, +11.5k train-time
@@ -554,7 +564,21 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   rep effect); folded graph 395 nodes, op-identical to the deployed P
   graph (only the release wrapper's L2-normalize tail differs). Judge
   vs 88.106 / rel-KD 0.502; fold before eval/export.
-- Queued next per the round plan: GeM pooling arm, ViT-S-as-teacher TA
+- **GeM pooling (implemented, ready)**: `GeM` module (learnable exponent
+  p, init 1 = exact GAP, weight-decay-exempt via `.global_avgpool.p`;
+  eps-clamp deviation on normalized features 2.6e-5, mAP-invisible) +
+  factories `osnet_ain_x1_0_gem` / `osnet_ain_x1_0_rep_gem` + config
+  `osnet_p_8gb_distill_ain_aug3_jpeg_rep_gem.yml`. Ladder step 2: warm
+  start = the UNFOLDED rep best (FIXME placeholder until that run
+  finishes); if rep fails its gate, switch to `osnet_ain_x1_0_gem` +
+  aug3_jpeg best instead — GeM is independent and gets tested either
+  way. `fold_rep.py --verify` auto-detects gem checkpoints (parity
+  1.3e-5); folded deployment graph = plain P + 2 Pow (export contract
+  needs the Pow pair before formal adoption). Watch the learned p
+  (retrieval-typical ~3).
+- Queued next per the round plan: embed-KD projector arm (small code:
+  Linear 512->768 loss-only projector, cosine loss, EMBED_WEIGHT gate;
+  pair ONLY with the representable no-cam teacher), ViT-S-as-teacher TA
   arm (config only), dual-teacher partial-L_cam rel-KD (small code).
 
 ## Measurement checklist per arm

@@ -16,6 +16,10 @@ def make_optimizer(cfg, model, center_criterion):
             # near zero; without this exemption weight decay erodes them to
             # zero before they can be recruited (observed: attn_nokd arm)
             weight_decay = 0.0
+        if key.endswith(".global_avgpool.p"):
+            # GeM exponent: decay would pull p toward 0, but the neutral
+            # (GAP) point is p = 1 — let the task gradient alone move it
+            weight_decay = 0.0
         if cfg.SOLVER.LARGE_FC_LR:
             if "classifier" in key or "arcface" in key:
                 lr = cfg.SOLVER.BASE_LR * 2

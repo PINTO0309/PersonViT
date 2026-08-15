@@ -1,0 +1,87 @@
+# Unified reid dataset / P rep + GeM stacked arm (no-cam jpeg teacher) / 8 GB GPU
+# Second step of the P-uplift ladder: keeps the rep train-time branches
+# and swaps GAP for GeM pooling (learnable exponent p, init 1 = exact
+# GAP, weight-decay-exempt). Warm start = the UNFOLDED rep-arm best (rep
+# keys load directly; the only new key is global_avgpool.p), so the run
+# is function-preserving at step one. If the rep arm FAILED its gate,
+# switch TRANSFORMER_TYPE to 'osnet_ain_x1_0_gem' and PRETRAIN_PATH back
+# to the aug3_jpeg best (88.106) — GeM is independent of rep and gets
+# tested either way. Judge vs the warm-start arm's clean / rel-KD; watch
+# the learned p (typical retrieval convergence ~3). Fold with
+# tools/fold_rep.py before eval/export; deployment graph = plain + GeM
+# (Pow -> GlobalAveragePool -> Pow; export contract needs the 2 Pow ops
+# added before formal adoption).
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg_rep/transformer_best_e000040_map0.88280.pth'
+  PRETRAIN_HW_RATIO: 1
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'osnet_ain_x1_0_rep_gem'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  JPEG_PROB: 0.5
+  JPEG_QUALITY: [20, 90]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 16
+
+DISTILL:
+  ENABLED: True
+  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_aug2_jpeg.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_aug2_jpeg/transformer_best_*.pth'
+  LOGIT_WEIGHT: 1.0
+  REL_WEIGHT: 30.0
+  EMBED_WEIGHT: 0.0
+  TEMPERATURE: 4.0
+
+SOLVER:
+  OPTIMIZER_NAME: 'Adam'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.0001
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 64
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  5e-4
+  WEIGHT_DECAY_BIAS: 5e-4
+  BIAS_LR_FACTOR: 1
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg_rep_gem'

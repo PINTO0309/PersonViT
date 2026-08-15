@@ -247,6 +247,29 @@ class LiteSelfAttention(nn.Module):
         return identity + self.gate * x
 
 
+class GeM(nn.Module):
+    """Generalized-mean pooling: ((1/N) sum x^p)^(1/p) with learnable p.
+
+    p = 1 is exactly GAP, p -> inf approaches max pooling; the single
+    learnable dial lets the model emphasize strong local activations
+    (where reid identity evidence concentrates) instead of averaging
+    them away with background. Initialized at p = 1 so warm starts from
+    GAP-trained checkpoints are function-preserving; weight decay is
+    disabled for the parameter in solver/make_optimizer.py (decay would
+    systematically pull p toward 0, not toward the GAP point 1). ONNX:
+    Pow -> GlobalAveragePool -> Pow.
+    """
+
+    def __init__(self, p=1.0, eps=1e-6):
+        super(GeM, self).__init__()
+        self.p = nn.Parameter(torch.full((1,), float(p)))
+        self.eps = eps
+
+    def forward(self, x):
+        return nn.functional.adaptive_avg_pool2d(
+            x.clamp(min=self.eps).pow(self.p), 1).pow(1.0 / self.p)
+
+
 class SeparableSelfAttention(nn.Module):
     """O(N) separable self-attention (MobileViTv2-style) for early feature maps.
 
@@ -287,7 +310,8 @@ class OSNetAIN(nn.Module):
 
     def __init__(self, channels=(64, 256, 384, 512), feature_dim=512,
                  extra_blocks=(0, 0, 0), attn_dim=None, attn_heads=4,
-                 stem_in_only=False, sep_stem_attn=False, rep=False):
+                 stem_in_only=False, sep_stem_attn=False, rep=False,
+                 gem=False):
         super(OSNetAIN, self).__init__()
         self.conv1 = ConvLayer(3, channels[0], 7, stride=2, padding=3, IN=True)
         self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
@@ -334,7 +358,10 @@ class OSNetAIN(nn.Module):
         # init via its zero gate; new keys only, so checkpoints warm-start)
         self.attn = (LiteSelfAttention(channels[3], attn_dim, attn_heads)
                      if attn_dim else None)
-        self.global_avgpool = nn.AdaptiveAvgPool2d(1)
+        # gem=True swaps GAP for GeM under the same attribute name: the
+        # only new key is global_avgpool.p (init 1 = exact GAP), so any
+        # GAP-trained checkpoint warm-starts function-preserved
+        self.global_avgpool = GeM() if gem else nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Sequential(
             nn.Linear(channels[3], feature_dim),
             nn.BatchNorm1d(feature_dim),
@@ -449,6 +476,21 @@ def osnet_ain_x1_0_rep(**kwargs):
     # per-channel identity scale). Fold with tools/fold_rep.py before
     # export/eval — the deployment graph and cost are EXACTLY osnet_ain_x1_0.
     return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512, rep=True)
+
+
+def osnet_ain_x1_0_gem(**kwargs):
+    # GeM pooling on the plain architecture (fallback branch if the rep
+    # arm fails its gate); also the fold target for rep_gem checkpoints
+    return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512, gem=True)
+
+
+def osnet_ain_x1_0_rep_gem(**kwargs):
+    # stacked P-uplift arm: rep train-time branches + GeM pooling. Warm
+    # start from the UNFOLDED rep best (rep keys load directly; the only
+    # new key is global_avgpool.p at the exact-GAP point 1). Fold with
+    # tools/fold_rep.py -> plain osnet_ain_x1_0_gem deployment graph.
+    return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512,
+                    rep=True, gem=True)
 
 
 def osnet_ain_x1_0_sepattn(**kwargs):
