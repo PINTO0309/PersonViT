@@ -614,6 +614,13 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   +0.17 / +0.31). Warm starts = tier jpeg bests (N 88.445 / T 88.694),
   function preservation verified at 0.0 for both. Judge: clean vs the
   tier best, probe non-regression on folded weights.
+- **S embed-KD arm (ready)**:
+  `vit_small_8gb_distill_ain_aug2_jpeg_embed.yml` — the embed-KD step
+  transferred to S (projector 384 -> 768; rep/GeM judged inapplicable
+  to the ViT: no foldable dw+BN structure, and pooling swap breaks the
+  cls-token warm start). L_cam teacher is fine for S (geometry
+  representable at 0.49). Warm start S jpeg best 92.954; judge clean
+  vs 92.954 + probe non-regression; no fold step (no rep branches).
 - Queued next per the round plan: EMBED_WEIGHT 5.0 probe on P,
   ViT-S-as-teacher TA arm (config only), dual-teacher partial-L_cam
   rel-KD (small code).
