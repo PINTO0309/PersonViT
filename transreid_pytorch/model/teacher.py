@@ -65,6 +65,12 @@ def build_teacher(cfg, num_classes, camera_num, view_num):
     # never load the self-supervised checkpoint; the trained weights follow
     tcfg.MODEL.PRETRAIN_CHOICE = 'none'
     tcfg.MODEL.DIST_TRAIN = False
+    # _defaults is the same object train.py already merged the STUDENT config
+    # into, and teacher configs carry no DISTILL section — so student DISTILL
+    # settings would leak into the teacher build. A teacher never distills;
+    # without this the student's EMBED_PROJ_DIM would grow an embed_proj on
+    # the teacher and its checkpoint load would fail on the missing key.
+    tcfg.DISTILL.ENABLED = False
     if tcfg.MODEL.JPM:
         raise NotImplementedError('JPM teachers are not supported')
     tcfg.freeze()
