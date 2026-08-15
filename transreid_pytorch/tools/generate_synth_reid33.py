@@ -87,6 +87,8 @@ WAIVABLE_APPROVAL_GATES = frozenset({
     "rotation_pilot.osnet_embedding",
     "rotation_pilot.manual_review",
 })
+MAX_ACTIVE_FULL_BATCHES = 3
+_BATCH_CAPACITY_ERROR_CODES = frozenset({"token_limit_exceeded"})
 
 
 class PipelineError(RuntimeError):
@@ -226,10 +228,48 @@ def _terminal_batch_job_status(batch_status: str) -> str:
     raise ValueError(f"Batch status is not terminal: {batch_status}")
 
 
+def _is_batch_capacity_failure(batch: Mapping[str, Any]) -> bool:
+    if batch.get("status") != "failed":
+        return False
+    remote = batch.get("remote") or {}
+    request_counts = remote.get("request_counts") or {}
+    errors = (remote.get("errors") or {}).get("data") or []
+    codes = {str(error.get("code", "")) for error in errors}
+    return (
+        int(request_counts.get("total") or 0) == 0
+        and bool(codes)
+        and codes <= _BATCH_CAPACITY_ERROR_CODES
+    )
+
+
+def _requeue_capacity_failure(
+    batch: dict[str, Any], jobs_by_id: Mapping[str, dict[str, Any]]
+) -> bool:
+    """Requeue a Batch rejected before execution without creating an API retry attempt."""
+    if not _is_batch_capacity_failure(batch) or batch.get("capacity_requeued"):
+        return False
+    for custom_id in batch["custom_ids"]:
+        job = jobs_by_id[custom_id]
+        if job.get("batch_id") != batch.get("batch_id"):
+            continue
+        if job["status"] not in {"submitted", "batch_validation_failed"}:
+            continue
+        job["status"] = "planned"
+        job.pop("batch_id", None)
+        job["capacity_requeues"] = int(job.get("capacity_requeues", 0)) + 1
+        job["last_capacity_failure_batch_id"] = batch["batch_id"]
+    batch["capacity_requeued"] = True
+    batch["capacity_requeued_at"] = utc_now()
+    return True
+
+
 def _batch_failure_summaries(batches: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     summaries = []
     for batch in batches:
-        if batch.get("status") not in {"failed", "expired", "cancelled"}:
+        if (
+            batch.get("status") not in {"failed", "expired", "cancelled"}
+            or batch.get("capacity_requeued")
+        ):
             continue
         remote = batch.get("remote") or {}
         errors = (remote.get("errors") or {}).get("data") or []
@@ -578,6 +618,9 @@ def _refresh_and_collect(
     changed = False
     for batch in batches:
         if batch["status"] in {"failed", "expired", "cancelled"}:
+            if _is_batch_capacity_failure(batch):
+                changed = _requeue_capacity_failure(batch, jobs_by_id) or changed
+                continue
             job_status = _terminal_batch_job_status(batch["status"])
             for custom_id in batch["custom_ids"]:
                 if jobs_by_id[custom_id]["status"] == "submitted":
@@ -595,10 +638,13 @@ def _refresh_and_collect(
         changed = True
         if batch["status"] != "completed":
             if batch["status"] in {"failed", "expired", "cancelled"}:
-                job_status = _terminal_batch_job_status(batch["status"])
-                for custom_id in batch["custom_ids"]:
-                    if jobs_by_id[custom_id]["status"] == "submitted":
-                        jobs_by_id[custom_id]["status"] = job_status
+                if _is_batch_capacity_failure(batch):
+                    changed = _requeue_capacity_failure(batch, jobs_by_id) or changed
+                else:
+                    job_status = _terminal_batch_job_status(batch["status"])
+                    for custom_id in batch["custom_ids"]:
+                        if jobs_by_id[custom_id]["status"] == "submitted":
+                            jobs_by_id[custom_id]["status"] = job_status
             continue
         payload_parts = []
         if remote.get("output_file_id"):
@@ -828,6 +874,16 @@ def _job_cost_estimates(paths: Mapping[str, Path]) -> tuple[dict[str, float], fl
     return estimates, max(all_values, default=0.0)
 
 
+def _estimated_job_cost(
+    job: Mapping[str, Any], cost_estimates: Mapping[str, float], conservative_fallback: float
+) -> float:
+    if job["kind"] == "sample":
+        key = f"pilot:{job.get('quality') or job['body'].get('quality')}"
+    else:
+        key = f"asset:{job['body'].get('quality')}"
+    return float(cost_estimates.get(key, conservative_fallback))
+
+
 def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
     jobs, paths = plan_scope(root, config, scope)
     client = OpenAIBatchClient()
@@ -879,10 +935,21 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
         raise PipelineError(
             "body-rotation pilot requires measured low-quality pilot usage before submission"
         )
-    pending_reserve = 0.0
+    pending_reserve = sum(
+        _estimated_job_cost(job, cost_estimates, conservative_fallback)
+        for job in jobs
+        if job["status"] == "submitted" and job["scope"] in (scope, "asset")
+    )
+    active_full_batches = sum(
+        batch.get("scope") == "full"
+        and batch.get("status") in {"validating", "in_progress", "finalizing"}
+        for batch in batches
+    )
     for endpoint, group in sorted(groups.items()):
         group.sort(key=lambda row: row["custom_id"])
         for chunk_no, start in enumerate(range(0, len(group), chunk_size)):
+            if scope == "full" and active_full_batches >= MAX_ACTIVE_FULL_BATCHES:
+                break
             chunk = group[start : start + chunk_size]
             request_path = root / "requests" / "live" / f"{scope}-{endpoint.rsplit('/', 1)[-1]}-{utc_now().replace(':', '')}-{chunk_no:03d}.jsonl"
             lines = []
@@ -894,13 +961,10 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
             if not lines:
                 continue
             if scope in {"full", "rotation_pilot"}:
-                next_estimate = 0.0
-                for job in chunk:
-                    if job["kind"] == "sample":
-                        key = f"pilot:{job.get('quality') or job['body'].get('quality')}"
-                    else:
-                        key = f"asset:{job['body'].get('quality')}"
-                    next_estimate += cost_estimates.get(key, conservative_fallback)
+                next_estimate = sum(
+                    _estimated_job_cost(job, cost_estimates, conservative_fallback)
+                    for job in chunk
+                )
                 maximum = (
                     float(json.loads(paths["approval"].read_text(encoding="utf-8"))["max_usd"])
                     if scope == "full"
@@ -930,6 +994,8 @@ def run_live(root: Path, config: Mapping[str, Any], scope: str) -> None:
                 "status": remote.get("status", "validating"),
                 "created_at": utc_now(),
             })
+            if scope == "full":
+                active_full_batches += 1
             pending_reserve += next_estimate if scope in {"full", "rotation_pilot"} else 0.0
             for custom_id in custom_ids:
                 next(job for job in jobs if job["custom_id"] == custom_id)["status"] = "submitted"

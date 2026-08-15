@@ -640,6 +640,44 @@ def test_batch_validation_failure_is_terminal_and_preserves_error(tmp_path, conf
     }]
 
 
+def test_batch_capacity_rejection_returns_jobs_to_first_submission_queue(tmp_path, config):
+    paths = _paths(tmp_path)
+    paths["state"].mkdir(parents=True)
+    job = {
+        "custom_id": "job-a", "scope": "full", "kind": "sample", "sample_id": "x",
+        "status": "submitted", "attempt": 1, "batch_id": "batch-a", "body": {},
+        "logical_refs": [],
+    }
+    atomic_write_jsonl(paths["jobs"], [job])
+    atomic_write_jsonl(paths["batches"], [{
+        "batch_id": "batch-a", "scope": "full", "status": "validating",
+        "custom_ids": ["job-a"],
+    }])
+
+    class FakeClient:
+        def retrieve(self, _batch_id):
+            return {
+                "id": "batch-a", "status": "failed",
+                "request_counts": {"total": 0, "completed": 0, "failed": 0},
+                "errors": {"data": [{
+                    "code": "token_limit_exceeded", "param": None,
+                    "message": "Enqueued token limit reached for gpt-image-2.",
+                }]},
+            }
+
+    _refresh_and_collect(FakeClient(), tmp_path, config, paths)
+
+    requeued = read_jsonl(paths["jobs"])[0]
+    assert requeued["status"] == "planned"
+    assert requeued["attempt"] == 1
+    assert requeued["capacity_requeues"] == 1
+    assert "batch_id" not in requeued
+    assert read_jsonl(paths["attempts"]) == []
+    batches = read_jsonl(paths["batches"])
+    assert batches[0]["capacity_requeued"] is True
+    assert _batch_failure_summaries(batches) == []
+
+
 def test_cost_ceiling_stops_before_next_batch():
     enforce_cost_ceiling(80.0, 10.0, 9.99, 100.0)
     with pytest.raises(PipelineError, match="cost stop"):
