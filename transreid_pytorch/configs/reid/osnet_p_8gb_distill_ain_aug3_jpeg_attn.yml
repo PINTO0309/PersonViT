@@ -1,0 +1,90 @@
+# Unified reid dataset / P distilled from the NO-CAM jpeg teacher + tail attention / 8 GB GPU
+# Derivative of osnet_p_8gb_distill_ain_aug3_jpeg.yml: TRANSFORMER_TYPE
+# osnet_ain_x1_0_attn (gated 128-dim tail LiteSelfAttention, new keys
+# only), warm-started from that parent arm's OWN best (88.106, terminal
+# rel-KD 0.502) on a 100-epoch schedule. This is the cleanest gate
+# readout yet: the init already matches the teacher as well as a
+# conv-only OSNet can, so any further Distill reduction must flow
+# through the attention block — maximal recruitment pressure. Every
+# prior self-suppression (attn2, attn_nokd2, attn_full, stem_attn)
+# happened under the L_cam teacher or with no teacher; this no-cam jpeg
+# teacher (B-ain-aug2-jpeg, 92.30) is representable (floor ~0.50), a
+# genuinely new environment. If the gate is recruited here, the earlier
+# closures were specific to the L_cam regime; if it self-suppresses
+# again, tail attention is dead for OSNet under every teacher. Judge:
+# gate trajectory (base.attn.gate), terminal rel-KD vs 0.502, clean vs
+# 88.11.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg/transformer_best_e000038_map0.88106.pth'
+  PRETRAIN_HW_RATIO: 1
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'osnet_ain_x1_0_attn'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  JPEG_PROB: 0.5
+  JPEG_QUALITY: [20, 90]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 16
+
+DISTILL:
+  ENABLED: True
+  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_aug2_jpeg.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_aug2_jpeg/transformer_best_*.pth'
+  LOGIT_WEIGHT: 1.0
+  REL_WEIGHT: 30.0
+  EMBED_WEIGHT: 0.0
+  TEMPERATURE: 4.0
+
+SOLVER:
+  OPTIMIZER_NAME: 'Adam'
+  MAX_EPOCHS: 100
+  BASE_LR: 0.0001
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 64
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  5e-4
+  WEIGHT_DECAY_BIAS: 5e-4
+  BIAS_LR_FACTOR: 1
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg_attn'

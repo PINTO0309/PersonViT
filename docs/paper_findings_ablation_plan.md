@@ -431,6 +431,42 @@ hardening — the jpeg-q20 exposure roughly halves on every tier at zero
 cost elsewhere, with P (the most exposed tier) also gaining +0.34 clean.
 All five README rows and ONNX artifacts now carry the jpeg lineage.
 
+### No-camproxy JPEG teacher arm (B-ain-aug2-jpeg)
+
+`vit_base_8gb_ain_aug2_jpeg.yml` — same jpeg recipe, CAMPROXY off, same
+warm start as the round-2 arms (B-ain-aug 92.26, identical init to A0/A1).
+Result: clean **92.30** (e36) — vs A0 ctrl 92.31 the jpeg gain without
+L_cam is **0.0** (the +0.15 seen on the cam lineage is not reproduced
+without it), and vs cam_jpeg 93.50 the L_cam contribution stays **+1.20**
+inside the jpeg recipe: the two components are additive with no overlap.
+Probe: jpeg-q20 −1.36 / q40 −0.38 — **compression hardening replicates
+in full without L_cam** (cam_jpeg: −1.32/−0.3); photometric mean-8 ~1.7
+(warm −6.73, contrast+ −3.25) vs cam_jpeg 1.26 (warm −3.77) — the
+photometric-robustness advantage belongs to L_cam, not to jpeg.
+Attribution is now fully factored: AIN = architecture-level photometric
+robustness, L_cam = clean +1.05..1.20 AND warm/mean photometric gains,
+JPEG aug = compression hardening only, all three independent.
+Primary purpose: teacher for the `osnet_p_8gb_distill_ain_aug3_jpeg`
+student arm — if a no-cam jpeg teacher distills into P at the
+old-teacher floor (~0.43) the CNN 0.77 floor is pinned on the L_cam
+geometry itself; if 0.77 persists the L_cam-cause hypothesis falls.
+
+**Student result — L_cam-cause CONFIRMED.** P distilled from the no-cam
+jpeg teacher (40 ep, same recipe as the P jpeg arm): terminal
+relational-KD **0.502** (e1 already 0.556 from the warm start — the
+teacher geometry is representable from step one), best clean **88.11**
+(e38) vs the P jpeg best 88.15 (old B-ain-aug teacher): parity −0.04.
+The 0.77 floor is therefore specific to the L_cam teacher geometry —
+not to distillation, capacity, jpeg, or the teacher's training round.
+Combined with the ViT-S full transfer (0.49), the picture is: L_cam
+adds ~0.27 of unrepresentable structure for a 5-IN OSNet; whether the
+INs are the reason is exactly what the running stem_attn arm decides
+(its terminal Distill now has a measured CNN-reachable reference of
+~0.50 under a representable teacher). Probe: jpeg-q20 −2.45 / q40 −0.71
+/ mean-8 3.39 vs the P jpeg best's −2.61 / 3.43 — the jpeg-hardened
+teacher adds a marginal q20 gain and parity elsewhere, so the arm's
+value is the causal verdict, not a new P lineage (clean −0.04 vs 88.15).
+
 ## IN-information-loss probe (stem-IN-only arm, running)
 
 Live hypothesis after Phase 3: the OSNet-AIN students' 0.77 relational-KD
