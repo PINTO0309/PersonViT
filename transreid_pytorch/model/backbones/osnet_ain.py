@@ -58,28 +58,47 @@ class Conv1x1Linear(nn.Module):
 
 
 class LightConv3x3(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, rep=False):
         super(LightConv3x3, self).__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 1, stride=1, padding=0,
                                bias=False)
         self.conv2 = nn.Conv2d(out_channels, out_channels, 3, stride=1, padding=1,
                                bias=False, groups=out_channels)
+        # train-time structural reparameterization (RepVGG/MobileOne style):
+        # two extra linear branches parallel to the depthwise 3x3 — a
+        # depthwise 1x1 and a per-channel identity scale — summed BEFORE the
+        # shared BN. Both are linear in the same input, so at export they
+        # fold EXACTLY into conv2's center tap (tools/fold_rep.py) and the
+        # deployment graph stays the plain osnet_ain_x1_0 graph at zero
+        # cost. Zero init keeps warm starts function-preserving from step
+        # one (new keys only); the value is the changed optimization
+        # dynamics, not added inference capacity.
+        if rep:
+            self.rep_conv = nn.Conv2d(out_channels, out_channels, 1, stride=1,
+                                      padding=0, bias=False, groups=out_channels)
+            self.rep_id = nn.Parameter(torch.zeros(out_channels))
+        else:
+            self.rep_conv = None
         self.bn = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, x):
-        return self.relu(self.bn(self.conv2(self.conv1(x))))
+        x = self.conv1(x)
+        y = self.conv2(x)
+        if self.rep_conv is not None:
+            y = y + self.rep_conv(x) + self.rep_id.view(1, -1, 1, 1) * x
+        return self.relu(self.bn(y))
 
 
 class LightConvStream(nn.Module):
     """Stacked LightConv3x3 stream of a given depth."""
 
-    def __init__(self, in_channels, out_channels, depth):
+    def __init__(self, in_channels, out_channels, depth, rep=False):
         super(LightConvStream, self).__init__()
         assert depth >= 1
-        layers = [LightConv3x3(in_channels, out_channels)]
+        layers = [LightConv3x3(in_channels, out_channels, rep=rep)]
         for _ in range(depth - 1):
-            layers.append(LightConv3x3(out_channels, out_channels))
+            layers.append(LightConv3x3(out_channels, out_channels, rep=rep))
         self.layers = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -108,14 +127,14 @@ class ChannelGate(nn.Module):
 class OSBlock(nn.Module):
     """Omni-scale residual block (BatchNorm variant)."""
 
-    def __init__(self, in_channels, out_channels, reduction=4, T=4):
+    def __init__(self, in_channels, out_channels, reduction=4, T=4, rep=False):
         super(OSBlock, self).__init__()
         assert T >= 1
         mid_channels = out_channels // reduction
         self.conv1 = Conv1x1(in_channels, mid_channels)
         self.conv2 = nn.ModuleList()
         for t in range(1, T + 1):
-            self.conv2.append(LightConvStream(mid_channels, mid_channels, t))
+            self.conv2.append(LightConvStream(mid_channels, mid_channels, t, rep=rep))
         self.gate = ChannelGate(mid_channels)
         self.conv3 = Conv1x1Linear(mid_channels, out_channels)
         self.downsample = None
@@ -137,14 +156,14 @@ class OSBlock(nn.Module):
 class OSBlockINin(nn.Module):
     """Omni-scale residual block with instance normalization on the branch."""
 
-    def __init__(self, in_channels, out_channels, reduction=4, T=4):
+    def __init__(self, in_channels, out_channels, reduction=4, T=4, rep=False):
         super(OSBlockINin, self).__init__()
         assert T >= 1
         mid_channels = out_channels // reduction
         self.conv1 = Conv1x1(in_channels, mid_channels)
         self.conv2 = nn.ModuleList()
         for t in range(1, T + 1):
-            self.conv2.append(LightConvStream(mid_channels, mid_channels, t))
+            self.conv2.append(LightConvStream(mid_channels, mid_channels, t, rep=rep))
         self.gate = ChannelGate(mid_channels)
         self.conv3 = Conv1x1Linear(mid_channels, out_channels, bn=False)
         self.downsample = None
@@ -268,7 +287,7 @@ class OSNetAIN(nn.Module):
 
     def __init__(self, channels=(64, 256, 384, 512), feature_dim=512,
                  extra_blocks=(0, 0, 0), attn_dim=None, attn_heads=4,
-                 stem_in_only=False, sep_stem_attn=False):
+                 stem_in_only=False, sep_stem_attn=False, rep=False):
         super(OSNetAIN, self).__init__()
         self.conv1 = ConvLayer(3, channels[0], 7, stride=2, padding=3, IN=True)
         self.maxpool = nn.MaxPool2d(3, stride=2, padding=1)
@@ -288,27 +307,27 @@ class OSNetAIN(nn.Module):
         # may be what makes the L_cam teacher geometry unrepresentable.
         inin = OSBlock if stem_in_only else OSBlockINin
         self.conv2 = nn.Sequential(
-            inin(channels[0], channels[1]),
-            inin(channels[1], channels[1]),
-            *[OSBlock(channels[1], channels[1]) for _ in range(extra_blocks[0])],
+            inin(channels[0], channels[1], rep=rep),
+            inin(channels[1], channels[1], rep=rep),
+            *[OSBlock(channels[1], channels[1], rep=rep) for _ in range(extra_blocks[0])],
         )
         self.pool2 = nn.Sequential(
             Conv1x1(channels[1], channels[1]),
             nn.AvgPool2d(2, stride=2),
         )
         self.conv3 = nn.Sequential(
-            OSBlock(channels[1], channels[2]),
-            inin(channels[2], channels[2]),
-            *[OSBlock(channels[2], channels[2]) for _ in range(extra_blocks[1])],
+            OSBlock(channels[1], channels[2], rep=rep),
+            inin(channels[2], channels[2], rep=rep),
+            *[OSBlock(channels[2], channels[2], rep=rep) for _ in range(extra_blocks[1])],
         )
         self.pool3 = nn.Sequential(
             Conv1x1(channels[2], channels[2]),
             nn.AvgPool2d(2, stride=2),
         )
         self.conv4 = nn.Sequential(
-            inin(channels[2], channels[3]),
-            OSBlock(channels[3], channels[3]),
-            *[OSBlock(channels[3], channels[3]) for _ in range(extra_blocks[2])],
+            inin(channels[2], channels[3], rep=rep),
+            OSBlock(channels[3], channels[3], rep=rep),
+            *[OSBlock(channels[3], channels[3], rep=rep) for _ in range(extra_blocks[2])],
         )
         self.conv5 = Conv1x1(channels[3], channels[3])
         # optional global-relation block between conv5 and GAP (identity at
@@ -323,6 +342,12 @@ class OSNetAIN(nn.Module):
         )
         self.in_planes = feature_dim
         self._init_params()
+        # _init_params kaiming-inits every Conv2d; re-zero the rep branches
+        # afterwards so a rep model is function-identical to its plain
+        # warm-start checkpoint at step one
+        for m in self.modules():
+            if isinstance(m, LightConv3x3) and m.rep_conv is not None:
+                nn.init.zeros_(m.rep_conv.weight)
 
     def _init_params(self):
         for m in self.modules():
@@ -416,6 +441,14 @@ def osnet_ain_stem_x1_0_attn(**kwargs):
     # plain BN OSBlocks elsewhere, plus the bottlenecked attention block
     return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512,
                     attn_dim=128, stem_in_only=True)
+
+
+def osnet_ain_x1_0_rep(**kwargs):
+    # train-time structural reparameterization: every depthwise 3x3 in the
+    # LightConv streams gains two zero-init linear branches (dw 1x1 +
+    # per-channel identity scale). Fold with tools/fold_rep.py before
+    # export/eval — the deployment graph and cost are EXACTLY osnet_ain_x1_0.
+    return OSNetAIN(channels=(64, 256, 384, 512), feature_dim=512, rep=True)
 
 
 def osnet_ain_x1_0_sepattn(**kwargs):

@@ -467,6 +467,22 @@ INs are the reason is exactly what the running stem_attn arm decides
 teacher adds a marginal q20 gain and parity elsewhere, so the arm's
 value is the causal verdict, not a new P lineage (clean −0.04 vs 88.15).
 
+**Tail attention: FINAL closure (fifth environment).** The
+`osnet_p_8gb_distill_ain_aug3_jpeg_attn` arm gave the gate its best-case
+conditions — a representable teacher (floor 0.50) and a warm start from
+the parent's own converged best (88.106), so any Distill improvement had
+to flow through the attention block. The gate went from 0.01 straight
+through zero to **−0.00067 by e10** (qkv/proj norms healthy at
+3.28/1.50 — a learned "don't use it", not weight erosion), Distill
+showed no sub-parent movement. KILLED at e10 by decision. Combined with
+attn2 (L_cam teacher), attn_nokd2 (no teacher), attn_full (native
+width), and stem_attn (IN×1): tail attention is not recruited by OSNet
+under any teacher, normalization environment, or width — the 16×8
+post-conv5 features hold no residual pairwise-relation information worth
+modeling. The remaining attention question is the ENTRANCE placement
+(sepattn arms), which is mechanistically distinct and unaffected by
+this closure.
+
 ## IN-information-loss probe (stem-IN-only arm, running)
 
 Live hypothesis after Phase 3: the OSNet-AIN students' 0.77 relational-KD
@@ -514,6 +530,32 @@ Sequencing: start after the stem_attn verdict so the IN-reduction and
 entrance-attention variables stay separable; primary readout is the two
 gate trajectories (`base.stem_attn.gate` entrance / `base.attn.gate` tail)
 vs the thrice-observed tail self-suppression signature.
+
+## P-uplift round (post-closure exploration)
+
+Multi-axis search for further P gains after the causal questions closed.
+Evidence-killed axes (not to revisit): capacity (P/N/T transients
+identical), plain schedule extension (aug4), direct L_cam on the CNN
+(+0), tail attention (5 environments), NPO, cosine-CE.
+
+- **Model soup (measured)**: averaging the two P jpeg bests (aug2_jpeg
+  88.145 + aug3_jpeg 88.106; same warm-start basin, solution distance
+  0.73%) scores **88.24 / R1 95.0** on the unified split — +0.10 over
+  the best member for zero training. Probe + officials gates still
+  needed before any README adoption; N-member extension open.
+- **Rep overparameterization (designed, ready)**:
+  `osnet_ain_x1_0_rep` + `osnet_p_8gb_distill_ain_aug3_jpeg_rep.yml` —
+  all 60 LightConv depthwise 3x3s train with two zero-init linear
+  branches (dw 1x1 + per-channel identity scale, +11.5k train-time
+  params), summed pre-BN, folded EXACTLY into the 3x3 center tap by
+  `tools/fold_rep.py` (parity 1.4e-5). Warm start = aug3_jpeg best
+  88.106, function-preserving at step one (verified diff 0.0). ONNX:
+  train-form graph 696 nodes (BNs unfused behind the branch Adds — the
+  rep effect); folded graph 395 nodes, op-identical to the deployed P
+  graph (only the release wrapper's L2-normalize tail differs). Judge
+  vs 88.106 / rel-KD 0.502; fold before eval/export.
+- Queued next per the round plan: GeM pooling arm, ViT-S-as-teacher TA
+  arm (config only), dual-teacher partial-L_cam rel-KD (small code).
 
 ## Measurement checklist per arm
 
