@@ -213,7 +213,7 @@ AIN_AUG_MODELS = (
         architecture="OSNet-AIN x1.0",
         config="transreid_pytorch/configs/reid/osnet_p_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed/"
+            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed5_shint/"
             "folded_best.pth"
         ),
         output="osnet_ain_x1_0_p_unified_aug.onnx",
@@ -373,10 +373,10 @@ def build_inference_model(
         view_num=0,
     )
     # Training-only auxiliaries are stripped before the strict load: the
-    # embedding-KD projector (embed_proj.*) exists purely for the distillation
-    # loss and has no inference path.
+    # embedding-KD and intermediate-hint projectors exist purely for the
+    # distillation loss and have no inference path.
     state_dict = {k: v for k, v in state_dict.items()
-                  if not k.startswith("embed_proj.")}
+                  if not k.startswith(("embed_proj.", "hint_proj."))}
     # Unlike the repository's permissive inference loader, export requires an
     # exact match so a malformed or mismatched checkpoint cannot go unnoticed.
     model.load_state_dict(state_dict, strict=True)

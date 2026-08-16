@@ -32,12 +32,12 @@ REP_ID = '.rep_id'
 def fold_rep_state(state):
     """Return a plain state dict with every rep branch folded into conv2.
 
-    Loss-only auxiliaries (the embedding-KD projector) are dropped too:
-    the folded file is a deployment artifact.
+    Loss-only auxiliaries (the embedding-KD and intermediate-hint
+    projectors) are dropped too: the folded file is a deployment artifact.
     """
     folded = {k: v.clone() for k, v in state.items()
               if REP_CONV not in k and not k.endswith(REP_ID)
-              and 'embed_proj.' not in k}
+              and 'embed_proj.' not in k and 'hint_proj.' not in k}
     for key, value in state.items():
         if key.endswith(REP_CONV):
             conv2 = folded[key[:-len(REP_CONV)] + '.conv2.weight']
