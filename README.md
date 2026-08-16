@@ -590,6 +590,42 @@ few real AMP training steps) is available with:
 python tools/smoke_reid.py --config configs/reid/vit_small_8gb.yml
 ```
 
+### Classifier initialization when the id space changes
+
+`load_param` copies every shape-matching key from `MODEL.PRETRAIN_PATH` —
+including the classifier. Whether the head warm-starts therefore depends
+only on whether the train-id count changed:
+
+| Warm-start pattern | Classifier | Action needed |
+| --- | --- | --- |
+| Same dataset build (fine-tune round, recipe ablation, teacher swap) | inherited | none |
+| Train-id count changed (new domain integrated, dataset added/removed, split rebuilt with different ids) | **shape mismatch → silently re-initialized** | **run `tools/init_classifier_centers.py` first** |
+
+A randomly re-initialized head is not a cosmetic problem: its early CE
+gradients are noise with respect to the true classes and flow into the
+warm backbone, so a standard 40-epoch schedule spends most of its budget
+maturing the head instead of refining features (observed on the d05
+teacher round 1: `Acc` started at 0.000 and the run never beat its own
+warm start). The tool removes that phase with one deterministic forward
+pass: it computes each class's mean BNNeck feature under the warm
+backbone and writes a checkpoint whose classifier starts as a
+nearest-class-mean head, norm-calibrated to the source checkpoint
+(measured: `Acc` 0.971 from the first training iterations, versus 0.000
+without it — equivalent to skipping an entire maturation round):
+
+```shell
+python tools/init_classifier_centers.py \
+    --config configs/reid/<new-run>.yml \
+    --weight "logs/<warm-run>/transformer_best_*.pth" \
+    --output logs/<warm-run>/centers_init_<tag>.pth
+# then point the new config's MODEL.PRETRAIN_PATH at the --output file
+```
+
+How to tell which case you are in: the trainer now prints
+`load_param skipped N keys ... ['classifier.weight']` when the head could
+not be inherited, and the first `Acc` values of epoch 1 stay at `0.000`.
+Either signal means the run should have gone through the tool.
+
 ### Knowledge distillation (teacher -> student)
 
 `configs/reid/vit_small_<vram>_distill.yml` trains a ViT-S/16 student under a
