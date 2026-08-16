@@ -2143,6 +2143,10 @@ def repair_local(
     manifest_rows = {row["sample_id"]: row for row in read_jsonl(manifest_path)}
     jobs = read_jsonl(paths["jobs"])
     jobs_by_id = {row["custom_id"]: row for row in jobs}
+    jobs_by_sample: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in jobs:
+        if row.get("scope") == scope and row.get("kind") == "sample":
+            jobs_by_sample[str(row["sample_id"])].append(row)
     attempts = read_jsonl(paths["attempts"])
     attempts_by_id = {row["custom_id"]: row for row in attempts}
     cameras = read_jsonl(paths["cameras"])
@@ -2183,7 +2187,6 @@ def repair_local(
             candidates = raw_candidates.get(sample_id, [])
             if not candidates:
                 missing_raw.append(sample_id)
-                continue
             evaluated = []
             for job, attempt, raw in candidates:
                 candidate_path = work / f"{job['custom_id']}.jpg"
@@ -2196,8 +2199,24 @@ def repair_local(
                 )
                 evaluated.append((job, attempt, qa, candidate_path))
                 processed += 1
-            winner = max(evaluated, key=lambda row: _repair_candidate_rank(row[0], row[2]))
-            if winner[2].get("accepted"):
+            winner = (
+                max(evaluated, key=lambda row: _repair_candidate_rank(row[0], row[2]))
+                if evaluated
+                else None
+            )
+            target_job = winner[0] if winner else max(
+                jobs_by_sample.get(sample_id, []),
+                key=lambda row: (int(row.get("attempt", 0)), str(row.get("custom_id", ""))),
+                default=None,
+            )
+            target_attempt = (
+                winner[1]
+                if winner
+                else attempts_by_id.get(str(target_job.get("custom_id")))
+                if target_job
+                else None
+            )
+            if winner and winner[2].get("accepted"):
                 repaired[sample_id] = (
                     *winner,
                     len(evaluated),
@@ -2217,7 +2236,12 @@ def repair_local(
                     }
                     for job, _attempt, qa, _candidate in evaluated
                 ]
-                if scope == "full":
+                if not evaluated:
+                    rejection_rows.append({
+                        "custom_id": target_job.get("custom_id") if target_job else None,
+                        "reason": "successful_raw_missing",
+                    })
+                if scope == "full" and target_job is not None and target_attempt is not None:
                     sibling_rows = _local_sibling_raw_candidates(
                         sample_id, specs, raw_candidates
                     )
@@ -2249,15 +2273,15 @@ def repair_local(
                                 **transform,
                             }
                             repaired[sample_id] = (
-                                winner[0],
-                                winner[1],
+                                target_job,
+                                target_attempt,
                                 qa,
                                 candidate_path,
                                 len(evaluated) + sibling_attempts,
                                 {
                                     "method": "local_sibling_reprocess",
                                     "processing_version": qa.get("processing_version"),
-                                    "selected_custom_id": winner[0]["custom_id"],
+                                    "selected_custom_id": target_job["custom_id"],
                                     "source_sample_id": source["sample_id"],
                                     "source_custom_id": source_job["custom_id"],
                                     **transform,
@@ -2267,7 +2291,7 @@ def repair_local(
                             break
                         rejection_rows.append(
                             {
-                                "custom_id": winner[0]["custom_id"],
+                                "custom_id": target_job["custom_id"],
                                 "source_sample_id": source["sample_id"],
                                 "source_custom_id": source_job["custom_id"],
                                 "reason": qa.get("reason"),
@@ -2337,7 +2361,9 @@ def repair_local(
             paths["jobs"], sorted(jobs_by_id.values(), key=lambda row: row["custom_id"])
         )
         report["repaired"] = len(repaired)
-        report["remaining_unresolved"] = len(missing_raw) + len(rejected)
+        report["remaining_unresolved"] = len(
+            (set(missing_raw) | set(rejected)) - set(repaired)
+        )
         report_path = qa_dir / f"local_repair_{scope}_report.json"
         atomic_write_json(report_path, report)
         print(json.dumps(report, ensure_ascii=False, indent=2))

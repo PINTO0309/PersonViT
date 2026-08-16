@@ -1694,6 +1694,113 @@ def test_local_sibling_repair_selects_same_identity_camera_and_mirrors_walking_s
     assert derived.getpixel((10, 100))[0] < derived.getpixel((90, 100))[0]
 
 
+def test_full_local_repair_uses_sibling_when_api_returned_no_image(
+    tmp_path, config, monkeypatch
+):
+    import generate_synth_reid33 as generator
+
+    paths = initialize(tmp_path, config)
+    samples = read_jsonl(paths["samples"])
+    grouped = {}
+    target = source = None
+    for sample in samples:
+        key = tuple(sample[field] for field in (
+            "local_pid", "local_camera", "split", "occluded"
+        ))
+        if key in grouped:
+            target, source = grouped[key], sample
+            break
+        grouped[key] = sample
+    assert target is not None and source is not None
+    atomic_write_jsonl(paths["samples"], [target, source])
+
+    def refs(sample):
+        return [
+            f"anchor-p{sample['local_pid']:03d}-{sample['anchor_orientation']}",
+            f"plate-c{sample['local_camera']:02d}",
+        ]
+
+    target_custom_id = f"full-{target['sample_id']}-a1"
+    source_custom_id = f"full-{source['sample_id']}-a1"
+    jobs = [
+        {
+            "custom_id": target_custom_id,
+            "scope": "full",
+            "kind": "sample",
+            "sample_id": target["sample_id"],
+            "status": "needs_revision",
+            "attempt": 1,
+            "quality": "low",
+            "logical_refs": refs(target),
+            "body": {"prompt": "target prompt", "quality": "low"},
+        },
+        {
+            "custom_id": source_custom_id,
+            "scope": "full",
+            "kind": "sample",
+            "sample_id": source["sample_id"],
+            "status": "succeeded",
+            "attempt": 1,
+            "quality": "low",
+            "logical_refs": refs(source),
+            "body": {"prompt": "source prompt", "quality": "low"},
+        },
+    ]
+    attempts = [
+        {
+            "custom_id": target_custom_id,
+            "classification": "revise_once",
+            "usage": {},
+            "estimated_cost_usd": 0.001,
+        },
+        {
+            "custom_id": source_custom_id,
+            "classification": "succeeded",
+            "usage": {},
+            "estimated_cost_usd": 0.01,
+        },
+    ]
+    asset_ids = sorted(set(refs(target) + refs(source)))
+    assets = [
+        {"asset_id": ref, "sha256": f"sha-{index}", "file_id": f"file-{index}"}
+        for index, ref in enumerate(asset_ids)
+    ]
+    atomic_write_jsonl(paths["jobs"], jobs)
+    atomic_write_jsonl(paths["attempts"], attempts)
+    atomic_write_jsonl(paths["assets"], assets)
+    source_raw = tmp_path / "raw" / "full" / f"{source_custom_id}.jpg"
+    source_raw.parent.mkdir(parents=True)
+    Image.new("RGB", (576, 1152), (45, 67, 89)).save(source_raw, format="JPEG")
+
+    def fake_process(_raw_path, final_path, _camera, _sample, _config):
+        Image.new("RGB", (128, 256), (12, 34, 56)).save(final_path, format="JPEG")
+        return {
+            "accepted": True,
+            "geometry_pass": True,
+            "processing_version": generator.PROCESSING_VERSION,
+            "person_detection": {"principal_score": 0.99},
+            "pose_geometry": {"region_scores": {"head": 5.0}},
+            "final_sha256": sha256_file(final_path),
+        }
+
+    monkeypatch.setattr(generator, "process_image", fake_process)
+    report = repair_local(tmp_path, config, "full")
+    manifest = {
+        row["sample_id"]: row for row in read_jsonl(paths["manifest"])
+    }
+
+    assert report["missing_successful_raw_count"] == 1
+    assert report["local_sibling_repairable"] == 1
+    assert report["remaining_unresolved"] == 0
+    assert manifest[target["sample_id"]]["selection"]["method"] == "local_sibling_reprocess"
+    assert manifest[target["sample_id"]]["request_custom_id"] == target_custom_id
+    target_job = next(
+        row for row in read_jsonl(paths["jobs"])
+        if row["custom_id"] == target_custom_id
+    )
+    assert target_job["status"] == "succeeded"
+
+
 def test_approval_requires_every_pilot_gate(config):
     with pytest.raises(ValueError, match="pilot report"):
         approval_payload({"pilot_gate_passed": False}, "low", 100.0, config)
