@@ -25,7 +25,7 @@ except ImportError as exc:  # pragma: no cover - exercised by CLI preflight
 
 
 SCHEMA_VERSION = "synth-reid33/v1"
-PROCESSING_VERSION = "synth-reid33-isp-v23-high-occlusion-cart-fragment-qa"
+PROCESSING_VERSION = "synth-reid33-isp-v24-high-confidence-knee-support-qa"
 CAMERA_GEOMETRY_VERSION = "synth-reid33-camera-geometry-v1"
 PROMPT_VERSION = "synth-reid33-prompt-v3-eight-yaw-camera-pitch"
 SPLITS = ("train", "query", "gallery")
@@ -62,6 +62,7 @@ MODERATE_ANKLE_LOGIT_MIN = -2.0
 STRONG_ANKLE_FALLBACK_LOGIT_MIN = 5.0
 LONGITUDINAL_ANKLE_LOGIT_MIN = -3.0
 KNEE_SUPPORT_LOGIT_MIN = 5.0
+HIGH_CONFIDENCE_KNEE_SUPPORT_LOGIT_MIN = 4.9
 SECONDARY_HIP_LOGIT_MIN = -1.0
 HIGH_OCCLUSION_HIP_LOGIT_MIN = -2.0
 HIGH_OCCLUSION_HIP_SUPPORT_LOGIT_MIN = -1.0
@@ -1446,6 +1447,13 @@ def _overlapped_ankle_visibility(
         knees_available
         and min(float(score) for score in knee_scores or ()) >= KNEE_SUPPORT_LOGIT_MIN
     )
+    high_confidence_knee_support_valid = bool(
+        knees_available
+        and pose_score is not None
+        and float(pose_score) >= POSE_DETECTOR_FALLBACK_SCORE_MIN
+        and min(float(score) for score in knee_scores or ())
+        >= HIGH_CONFIDENCE_KNEE_SUPPORT_LOGIT_MIN
+    )
     knee_locations_valid = []
     weak_ankle_knee_distance = math.inf
     weak_ankle_near_knee = False
@@ -1491,7 +1499,7 @@ def _overlapped_ankle_visibility(
             weakest_ankle_score >= LONGITUDINAL_ANKLE_LOGIT_MIN
             or deep_longitudinal_pose_support
         )
-        and knee_support_valid
+        and (knee_support_valid or high_confidence_knee_support_valid)
         and all(knee_locations_valid)
         and (weak_ankle_near_knee or high_confidence_weak_ankle_near_knee)
         and strong_ankle_below_weak
@@ -1531,6 +1539,10 @@ def _overlapped_ankle_visibility(
         "knee_scores": [float(score) for score in knee_scores] if knee_scores else None,
         "knee_support_logit_min": KNEE_SUPPORT_LOGIT_MIN,
         "knee_support_valid": knee_support_valid,
+        "high_confidence_knee_support_logit_min": (
+            HIGH_CONFIDENCE_KNEE_SUPPORT_LOGIT_MIN
+        ),
+        "high_confidence_knee_support_valid": high_confidence_knee_support_valid,
         "knee_locations_valid": knee_locations_valid,
         "weak_ankle_knee_distance_px": (
             round(weak_ankle_knee_distance, 3) if math.isfinite(weak_ankle_knee_distance) else None

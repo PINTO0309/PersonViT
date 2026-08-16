@@ -756,6 +756,45 @@ def test_high_confidence_longitudinal_leg_allows_ten_percent_knee_proximity():
     assert result["high_confidence_weak_ankle_near_knee"] is True
 
 
+def test_high_confidence_longitudinal_leg_allows_real_knee_support_regression():
+    result = _overlapped_ankle_visibility(
+        [11.7202, -2.3827],
+        [[318.318, 823.419], [351.976, 705.115]],
+        (215, 213, 234, 676),
+        (576, 1152),
+        knee_scores=[14.3765, 4.9308],
+        knee_points=[[321.0, 730.0], [352.0, 727.7]],
+        walking_pose=True,
+        pose_score=0.999881,
+    )
+
+    assert result["pass"] is True
+    assert result["knee_support_valid"] is False
+    assert result["high_confidence_knee_support_valid"] is True
+
+
+@pytest.mark.parametrize(
+    ("pose_score", "weak_knee_score"),
+    [(0.9899, 4.9308), (0.9999, 4.8999)],
+)
+def test_relaxed_knee_support_requires_high_confidence_and_bounded_knee(
+    pose_score, weak_knee_score
+):
+    result = _overlapped_ankle_visibility(
+        [11.7202, -2.3827],
+        [[318.318, 823.419], [351.976, 705.115]],
+        (215, 213, 234, 676),
+        (576, 1152),
+        knee_scores=[14.3765, weak_knee_score],
+        knee_points=[[321.0, 730.0], [352.0, 727.7]],
+        walking_pose=True,
+        pose_score=pose_score,
+    )
+
+    assert result["pass"] is False
+    assert result["high_confidence_knee_support_valid"] is False
+
+
 @pytest.mark.parametrize("pose_score", [None, 0.989])
 def test_extended_knee_proximity_requires_high_pose_confidence(pose_score):
     result = _overlapped_ankle_visibility(
