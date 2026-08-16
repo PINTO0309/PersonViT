@@ -655,6 +655,21 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   `osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed5_shint.yml`; the global
   variant is kept as the ablation fallback. Raw block output is the
   target (cosine is scale-invariant; final LN not applied).
+  **GATE PASSED (+0.26): best 88.855** (e40) — P record again, ladder
+  total +0.71 (88.145 → 88.28 → 88.59 → 88.86), all at zero inference
+  cost. e1 held 88.5; the largest-yet Distill spike (2.43) aligned by
+  e5. Folded (2.0e-6); probe: clean 88.86 post-fold, mean-8 3.09 (vs
+  3.22), warm −7.95 (vs −8.37), jpeg-q40 −0.55, jpeg-q20 −2.26 (delta
+  +0.07 vs rep_embed but absolute 86.60 > 86.40) — non-regression
+  PASSED, absolutes improved on every condition. Credit stays shared
+  between embed 5.0 and the spatial hint (combined by decision); the
+  global-hint ablation is optional.
+- **N/T shint rollout (ready)**:
+  `osnet_{n,t}_8gb_distill_ain_jpeg_rep_embed5_shint.yml` — warm starts
+  = tier rep_embed bests (N 88.930 / T 89.000, unfolded; rep branches
+  and embed_proj reload, hint_proj new), hint_proj auto-sized per tier
+  (N 640→768, T 768→768), builds verified. Judge: clean vs the tier
+  best, probe non-regression after fold.
 - Queued next per the round plan: ViT-S-as-teacher TA arm (config
   only), dual-teacher partial-L_cam rel-KD (small code), stem-IN + rep
   + embed + L_cam integration arm (gated on the stem_attn verdict).
