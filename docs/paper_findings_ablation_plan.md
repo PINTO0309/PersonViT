@@ -723,6 +723,32 @@ checkpoint_last incl. classifier, fresh 40ep cosine) decides the
 adoption question: judge legacy mAP vs 93.50 + probe/officials with a
 mature head; d05 must hold 100.
 
+**Round 2 — ADOPTED as the new B flagship.** Legacy best **93.594**
+(e33, first to beat 93.50), 6-domain overall **94.09** (zero-shot
+93.83, r1 93.87), d05 held 100.0, per-domain non-regression (d00
++0.42 / d03 +0.13, rest within ±0.16). Probe: clean 93.59, mean-8
+1.29 (r1's 1.33 healed back to the 1.26 baseline band), jpeg-q20
+−1.22 (improved). Officials: **msmt17 +0.91 (.9526)**, **duke_occ
++0.63 (.9584)**, market +0.23, cuhk03np +0.07, occ_reid −0.15 — a
+genuine real-domain generalization gain, satisfying the adoption
+criterion outright (both clean AND generalization improved). The
+r1→r2 pair also empirically confirms the LP-FT mechanism (Kumar et
+al., ICLR 2022): random-head fine-tuning left an OOD signature (clean
+neutral, probe worse), and the mature-head round healed it.
+
+**Two remedies compared.** The no-cam teacher took the
+class-center-init path (`tools/init_classifier_centers.py`, NCM head
+from one forward pass, row norms calibrated to the source classifier):
+Acc started at 0.971 (vs 0.000 random / 0.960 after a full maturation
+round) and one 40ep round reached legacy parity 92.3 with d05 = 100.0
+— the d05 acquisition at zero real-domain cost, in half the compute of
+the two-round protocol. Center-init is the standard for all future
+id-space changes (README section added); the cam lineage's legacy
+uplift (+0.09 and officials gains) is attributable to the synthetic
+cameras enriching L_cam, a path the no-cam recipe lacks. Next: student
+rounds on the 6-domain set (center-init + single round each), teachers:
+cam2 (93.594) for S, no-cam-synth (92.3, e40) for P/N/T.
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
