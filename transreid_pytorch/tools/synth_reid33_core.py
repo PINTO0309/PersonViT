@@ -25,7 +25,7 @@ except ImportError as exc:  # pragma: no cover - exercised by CLI preflight
 
 
 SCHEMA_VERSION = "synth-reid33/v1"
-PROCESSING_VERSION = "synth-reid33-isp-v22-cart-occlusion-pose-expansion-qa"
+PROCESSING_VERSION = "synth-reid33-isp-v23-high-occlusion-cart-fragment-qa"
 CAMERA_GEOMETRY_VERSION = "synth-reid33-camera-geometry-v1"
 PROMPT_VERSION = "synth-reid33-prompt-v3-eight-yaw-camera-pitch"
 SPLITS = ("train", "query", "gallery")
@@ -47,6 +47,9 @@ PERSON_CART_FRAGMENT_SCORE_MAX = 0.60
 PERSON_CART_FRAGMENT_IOU_MIN = 0.20
 PERSON_CART_FRAGMENT_OVERLAP_MIN = 0.70
 PERSON_CART_FRAGMENT_TOP_FRACTION_MIN = 0.15
+PERSON_CART_FRAGMENT_HIGH_OCCLUSION_RATIO_MIN = 0.45
+PERSON_CART_FRAGMENT_HIGH_OCCLUSION_OVERLAP_MIN = 0.68
+PERSON_CART_FRAGMENT_HIGH_OCCLUSION_POSE_SCORE_MIN = 0.99
 POSE_SCORE_MIN = 0.70
 POSE_MATCH_IOU_MIN = 0.30
 POSE_DETECTOR_FALLBACK_SCORE_MIN = 0.99
@@ -1346,10 +1349,19 @@ def _intentional_cart_person_fragment(
         0.0, float(candidate[2]) - float(candidate[0])
     ) * max(0.0, float(candidate[3]) - float(candidate[1]))
     candidate_extends_below = float(candidate[3]) > float(principal[3])
+    high_occlusion_pose_support = (
+        target_ratio >= PERSON_CART_FRAGMENT_HIGH_OCCLUSION_RATIO_MIN
+        and float(pose_geometry.get("pose_score", 0.0))
+        >= PERSON_CART_FRAGMENT_HIGH_OCCLUSION_POSE_SCORE_MIN
+        and overlap >= PERSON_CART_FRAGMENT_HIGH_OCCLUSION_OVERLAP_MIN
+    )
     passed = (
         float(scores[1]) <= PERSON_CART_FRAGMENT_SCORE_MAX
         and iou >= PERSON_CART_FRAGMENT_IOU_MIN
-        and overlap >= PERSON_CART_FRAGMENT_OVERLAP_MIN
+        and (
+            overlap >= PERSON_CART_FRAGMENT_OVERLAP_MIN
+            or high_occlusion_pose_support
+        )
         and candidate_top_fraction >= PERSON_CART_FRAGMENT_TOP_FRACTION_MIN
         and candidate_area > principal_area
         and candidate_extends_below
@@ -1366,6 +1378,12 @@ def _intentional_cart_person_fragment(
         "iou_min": PERSON_CART_FRAGMENT_IOU_MIN,
         "smaller_box_overlap": overlap,
         "smaller_box_overlap_min": PERSON_CART_FRAGMENT_OVERLAP_MIN,
+        "high_occlusion_pose_support": high_occlusion_pose_support,
+        "high_occlusion_ratio_min": PERSON_CART_FRAGMENT_HIGH_OCCLUSION_RATIO_MIN,
+        "high_occlusion_overlap_min": PERSON_CART_FRAGMENT_HIGH_OCCLUSION_OVERLAP_MIN,
+        "high_occlusion_pose_score_min": (
+            PERSON_CART_FRAGMENT_HIGH_OCCLUSION_POSE_SCORE_MIN
+        ),
         "candidate_top_fraction": candidate_top_fraction,
         "candidate_top_fraction_min": PERSON_CART_FRAGMENT_TOP_FRACTION_MIN,
         "candidate_area_ratio": candidate_area / principal_area,

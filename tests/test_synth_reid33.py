@@ -509,6 +509,54 @@ def test_intentional_cart_fragment_accepts_real_occlusion_regression():
     assert result["smaller_box_overlap"] >= 0.70
 
 
+def test_intentional_cart_fragment_accepts_high_occlusion_real_regression():
+    detection = {
+        "count": 2,
+        "candidate_boxes_xyxy": [
+            [206.7350, 192.8459, 423.8028, 548.0842],
+            [170.7117, 305.1538, 432.2348, 1036.1371],
+        ],
+        "candidate_scores": [0.8413, 0.3670],
+    }
+    pose = {"pass": True, "pose_candidate_count": 1, "pose_score": 0.9986659}
+    sample = {
+        "occluded": True,
+        "occluder": "plain luggage cart",
+        "target_occlusion_ratio": 0.4666,
+    }
+
+    result = _intentional_cart_person_fragment(detection, pose, sample)
+
+    assert result["pass"] is True
+    assert result["smaller_box_overlap"] < 0.70
+    assert result["high_occlusion_pose_support"] is True
+
+
+@pytest.mark.parametrize(
+    ("ratio", "pose_score"),
+    [(0.4499, 0.999), (0.4666, 0.9899)],
+)
+def test_intentional_cart_fragment_rejects_weak_high_occlusion_support(
+    ratio, pose_score
+):
+    detection = {
+        "count": 2,
+        "candidate_boxes_xyxy": [
+            [206.7350, 192.8459, 423.8028, 548.0842],
+            [170.7117, 305.1538, 432.2348, 1036.1371],
+        ],
+        "candidate_scores": [0.8413, 0.3670],
+    }
+    pose = {"pass": True, "pose_candidate_count": 1, "pose_score": pose_score}
+    sample = {
+        "occluded": True,
+        "occluder": "plain luggage cart",
+        "target_occlusion_ratio": ratio,
+    }
+
+    assert _intentional_cart_person_fragment(detection, pose, sample)["pass"] is False
+
+
 def test_tiny_secondary_person_filter_suppresses_real_edge_artifact():
     boxes = [
         [66.329, 330.612, 205.135, 741.614],

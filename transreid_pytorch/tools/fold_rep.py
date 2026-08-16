@@ -30,9 +30,14 @@ REP_ID = '.rep_id'
 
 
 def fold_rep_state(state):
-    """Return a plain state dict with every rep branch folded into conv2."""
+    """Return a plain state dict with every rep branch folded into conv2.
+
+    Loss-only auxiliaries (the embedding-KD projector) are dropped too:
+    the folded file is a deployment artifact.
+    """
     folded = {k: v.clone() for k, v in state.items()
-              if REP_CONV not in k and not k.endswith(REP_ID)}
+              if REP_CONV not in k and not k.endswith(REP_ID)
+              and 'embed_proj.' not in k}
     for key, value in state.items():
         if key.endswith(REP_CONV):
             conv2 = folded[key[:-len(REP_CONV)] + '.conv2.weight']
@@ -72,16 +77,29 @@ def main():
         sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         from model.backbones.osnet_ain import (osnet_ain_x1_0, osnet_ain_x1_0_gem,
                                                osnet_ain_x1_0_rep,
-                                               osnet_ain_x1_0_rep_gem)
+                                               osnet_ain_x1_0_rep_gem,
+                                               osnet_ain_x1_25, osnet_ain_x1_25_rep,
+                                               osnet_ain_x1_5, osnet_ain_x1_5_rep)
 
         def backbone_state(full, model):
             wanted = model.state_dict()
             return {k.replace('base.', '', 1): v for k, v in full.items()
                     if k.replace('base.', '', 1) in wanted}
 
+        # width is identified by the stem's output channels
+        stem = next(v for k, v in state.items() if k.endswith('conv1.conv.weight')
+                    and v.dim() == 4 and v.shape[1] == 3)
+        width = stem.shape[0]
         gem = any(k.endswith('global_avgpool.p') for k in state)
-        rep_factory = osnet_ain_x1_0_rep_gem if gem else osnet_ain_x1_0_rep
-        plain_factory = osnet_ain_x1_0_gem if gem else osnet_ain_x1_0
+        factories = {
+            64: (osnet_ain_x1_0_rep_gem if gem else osnet_ain_x1_0_rep,
+                 osnet_ain_x1_0_gem if gem else osnet_ain_x1_0),
+            80: (osnet_ain_x1_25_rep, osnet_ain_x1_25),
+            96: (osnet_ain_x1_5_rep, osnet_ain_x1_5),
+        }
+        if width not in factories or (gem and width != 64):
+            raise ValueError('no verify factory for stem width {} (gem={})'.format(width, gem))
+        rep_factory, plain_factory = factories[width]
         rep_model = rep_factory().eval()
         rep_model.load_state_dict(backbone_state(state, rep_model), strict=False)
         plain = plain_factory().eval()

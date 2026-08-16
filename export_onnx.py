@@ -199,7 +199,7 @@ AIN_AUG_MODELS = (
         architecture="ViT-S/16",
         config="transreid_pytorch/configs/reid/vit_small_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_vit_small_8gb_distill_ain_aug2_jpeg/"
+            "transreid_pytorch/logs/reid_vit_small_8gb_distill_ain_aug2_jpeg_embed/"
             "transformer_best_*.pth"
         ),
         output="personvit_vits16_ain_unified_aug.onnx",
@@ -213,8 +213,8 @@ AIN_AUG_MODELS = (
         architecture="OSNet-AIN x1.0",
         config="transreid_pytorch/configs/reid/osnet_p_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_aug2_jpeg/"
-            "transformer_best_*.pth"
+            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed/"
+            "folded_best.pth"
         ),
         output="osnet_ain_x1_0_p_unified_aug.onnx",
         pretraining_epoch=0,
@@ -228,8 +228,8 @@ AIN_AUG_MODELS = (
         architecture="OSNet-AIN x1.25",
         config="transreid_pytorch/configs/reid/osnet_n_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_n_8gb_distill_ain_aug2_jpeg/"
-            "transformer_best_*.pth"
+            "transreid_pytorch/logs/reid_osnet_n_8gb_distill_ain_jpeg_rep_embed/"
+            "folded_best.pth"
         ),
         output="osnet_ain_x1_25_n_unified_aug.onnx",
         pretraining_epoch=0,
@@ -243,8 +243,8 @@ AIN_AUG_MODELS = (
         architecture="OSNet-AIN x1.5",
         config="transreid_pytorch/configs/reid/osnet_t_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_t_8gb_distill_ain_aug2_jpeg/"
-            "transformer_best_*.pth"
+            "transreid_pytorch/logs/reid_osnet_t_8gb_distill_ain_jpeg_rep_embed/"
+            "folded_best.pth"
         ),
         output="osnet_ain_x1_5_t_unified_aug.onnx",
         pretraining_epoch=0,
@@ -372,6 +372,11 @@ def build_inference_model(
         camera_num=0,
         view_num=0,
     )
+    # Training-only auxiliaries are stripped before the strict load: the
+    # embedding-KD projector (embed_proj.*) exists purely for the distillation
+    # loss and has no inference path.
+    state_dict = {k: v for k, v in state_dict.items()
+                  if not k.startswith("embed_proj.")}
     # Unlike the repository's permissive inference loader, export requires an
     # exact match so a malformed or mismatched checkpoint cannot go unnoticed.
     model.load_state_dict(state_dict, strict=True)

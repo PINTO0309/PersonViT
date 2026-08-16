@@ -607,7 +607,20 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   P section tables updated to the rep_embed folded best (88.6 / 95.2 /
   97.5 / 98.1). ONNX flagship re-export still pending. Follow-ups:
   EMBED_WEIGHT 5.0 probe, N/T rollout (running).
-- **N/T rollout (ready)**: `osnet_ain_x1_25_rep` / `osnet_ain_x1_5_rep`
+- **N/T rollout — BOTH GATES PASSED, and S embed +0.08**: N best
+  **88.930** (+0.49 vs 88.445), T best **89.000** (+0.31 vs 88.694), S
+  embed best **93.029** (+0.08 vs 92.954, small as expected — S already
+  tracks the L_cam teacher at 0.49). Probes all non-regressed with
+  jpeg-q20 improved on every tier (N −2.59→−2.24, T −2.49→−2.22, S
+  −1.53); officials improved across the board (largest: N duke_occ
+  .8922→.9015, T msmt17 .8669→.8720, S msmt17 .9282→.9329). README
+  rows + officials + style tables updated for S/N/T (T/N style tables
+  were previously empty and are now filled); all four flagship ONNX
+  pairs re-exported from the new bests (full contract passed, parity
+  ~1e-7; exporter and fold_rep now strip the loss-only embed_proj key;
+  fold_rep --verify made width-aware). P-uplift round final ladder:
+  P 88.145→88.59, N 88.445→88.93, T 88.694→89.00, S 92.954→93.03.
+  Rollout design: `osnet_ain_x1_25_rep` / `osnet_ain_x1_5_rep`
   factories + `osnet_{n,t}_8gb_distill_ain_jpeg_rep_embed.yml` —
   deliberately COMBINED arms (teacher swap to no-cam jpeg + rep + embed
   KD in one run each; attribution was established on P: parity −0.04 /
