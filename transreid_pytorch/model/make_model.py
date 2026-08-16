@@ -252,6 +252,28 @@ class build_transformer(nn.Module):
                 and cfg.DISTILL.EMBED_PROJ_DIM > 0):
             self.embed_proj = nn.Linear(self.in_planes, cfg.DISTILL.EMBED_PROJ_DIM,
                                         bias=False)
+        # loss-only intermediate-hint projector (DISTILL.HINT_WEIGHT): pooled
+        # conv4 feature -> teacher space; requires a backbone that exposes
+        # hint_feat (the OSNet family)
+        self.hint_proj = None
+        if cfg.DISTILL.ENABLED and cfg.DISTILL.HINT_WEIGHT > 0:
+            if not hasattr(self.base, 'collect_hint'):
+                raise NotImplementedError(
+                    'DISTILL.HINT_WEIGHT needs a hint-capable backbone '
+                    '(OSNet family); {} does not expose hint_feat'.format(
+                        cfg.MODEL.TRANSFORMER_TYPE))
+            if cfg.DISTILL.EMBED_PROJ_DIM <= 0:
+                raise ValueError('DISTILL.HINT_WEIGHT requires EMBED_PROJ_DIM '
+                                 '(the teacher embedding dim)')
+            self.base.collect_hint = True
+            if cfg.DISTILL.HINT_MODE == 'spatial':
+                # per-position projection of the conv4 map onto the teacher's
+                # token grid (both 16x8 at stride 16)
+                self.hint_proj = nn.Conv2d(self.base.hint_channels,
+                                           cfg.DISTILL.EMBED_PROJ_DIM, 1, bias=False)
+            else:
+                self.hint_proj = nn.Linear(self.base.hint_channels,
+                                           cfg.DISTILL.EMBED_PROJ_DIM, bias=False)
 
         if pretrain_choice == 'self':
             self.load_param(model_path)

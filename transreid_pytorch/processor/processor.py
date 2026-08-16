@@ -125,13 +125,19 @@ def do_train(cfg,
         distill_criterion = DistillLoss(cfg.DISTILL.LOGIT_WEIGHT,
                                         cfg.DISTILL.REL_WEIGHT,
                                         cfg.DISTILL.EMBED_WEIGHT,
-                                        cfg.DISTILL.TEMPERATURE)
+                                        cfg.DISTILL.TEMPERATURE,
+                                        hint_weight=cfg.DISTILL.HINT_WEIGHT,
+                                        hint_mode=cfg.DISTILL.HINT_MODE)
         teacher.to(local_rank)
         teacher.eval()
-        # loss-only projector for cross-dimension embedding KD (may be None);
-        # fetch through the DDP wrapper if one was applied above
-        embed_proj = getattr(model.module if hasattr(model, 'module') else model,
-                             'embed_proj', None)
+        # loss-only projectors (may be None); fetch through the DDP wrapper
+        # if one was applied above
+        _m = model.module if hasattr(model, 'module') else model
+        embed_proj = getattr(_m, 'embed_proj', None)
+        hint_proj = getattr(_m, 'hint_proj', None)
+        hint_base = _m.base if hint_proj is not None else None
+        hint_spatial = (hint_proj is not None
+                        and cfg.DISTILL.HINT_MODE == 'spatial')
 
     cam_proxy_criterion = None
     if cfg.CAMPROXY.ENABLED:
@@ -198,8 +204,12 @@ def do_train(cfg,
                 if distill_criterion is not None:
                     teacher_score, teacher_feat = teacher(img, cam_label=target_cam,
                                                           view_label=target_view)
-                    distill_loss = distill_criterion(score, feat, teacher_score,
-                                                     teacher_feat, projector=embed_proj)
+                    distill_loss = distill_criterion(
+                        score, feat, teacher_score, teacher_feat,
+                        projector=embed_proj,
+                        hint_feat=hint_base.hint_feat if hint_base is not None else None,
+                        hint_projector=hint_proj,
+                        hint_target=teacher.hint_map() if hint_spatial else None)
                     distill_meter.update(distill_loss.item(), img.shape[0])
                     loss = loss + distill_loss
                 if cam_proxy_criterion is not None:

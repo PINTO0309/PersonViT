@@ -32,15 +32,18 @@ class DistillLoss(nn.Module):
     """
 
     def __init__(self, logit_weight=1.0, rel_weight=30.0, embed_weight=0.0,
-                 temperature=4.0):
+                 temperature=4.0, hint_weight=0.0, hint_mode='global'):
         super(DistillLoss, self).__init__()
         self.logit_weight = logit_weight
         self.rel_weight = rel_weight
         self.embed_weight = embed_weight
         self.temperature = temperature
+        self.hint_weight = hint_weight
+        self.hint_mode = hint_mode
 
     def forward(self, student_score, student_feat, teacher_score, teacher_feat,
-                projector=None):
+                projector=None, hint_feat=None, hint_projector=None,
+                hint_target=None):
         if isinstance(student_score, list):
             student_score = student_score[0]
         if isinstance(student_feat, list):
@@ -73,5 +76,23 @@ class DistillLoss(nn.Module):
             emb = (1.0 - F.cosine_similarity(embed_feat.float(),
                                              teacher_feat.float(), dim=1)).mean()
             loss = loss + self.embed_weight * emb
+
+        if self.hint_weight > 0:
+            if hint_feat is None or hint_projector is None:
+                raise ValueError('DISTILL.HINT_WEIGHT > 0 but the backbone '
+                                 'provided no hint feature/projector')
+            if self.hint_mode == 'spatial':
+                # per-position cosine between the projected conv4 map and the
+                # teacher's intermediate token map (grids match at stride 16)
+                if hint_target is None:
+                    raise ValueError('spatial hint needs the teacher token map')
+                cos = F.cosine_similarity(hint_projector(hint_feat).float(),
+                                          hint_target.float(), dim=1)
+                hint = (1.0 - cos).mean()
+            else:
+                pooled = hint_feat.mean(dim=(2, 3))
+                hint = (1.0 - F.cosine_similarity(hint_projector(pooled).float(),
+                                                  teacher_feat.float(), dim=1)).mean()
+            loss = loss + self.hint_weight * hint
 
         return loss

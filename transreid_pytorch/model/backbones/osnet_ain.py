@@ -368,6 +368,13 @@ class OSNetAIN(nn.Module):
             nn.ReLU(inplace=True),
         )
         self.in_planes = feature_dim
+        # intermediate-hint support (DISTILL.HINT_WEIGHT): when collect_hint
+        # is enabled by make_model, forward() stashes the pooled conv4
+        # feature for the distillation loss. hint_channels lets the loss-only
+        # projector size itself per tier (512/640/768 for x1_0/x1_25/x1_5).
+        self.hint_channels = channels[3]
+        self.collect_hint = False
+        self.hint_feat = None
         self._init_params()
         # _init_params kaiming-inits every Conv2d; re-zero the rep branches
         # afterwards so a rep model is function-identical to its plain
@@ -404,6 +411,8 @@ class OSNetAIN(nn.Module):
         x = self.conv3(x)
         x = self.pool3(x)
         x = self.conv4(x)
+        if self.collect_hint:
+            self.hint_feat = x  # conv4 map [B, C, 16, 8]; the loss pools it
         x = self.conv5(x)
         if self.attn is not None:
             x = self.attn(x)

@@ -1,0 +1,93 @@
+# Unified reid dataset / P embed-KD dose + SPATIAL intermediate hint / 8 GB GPU
+# Ladder step 4, run FIRST (user decision) — the improved hint variant.
+# Two changes vs the adopted rep_embed best (88.591): (a) EMBED_WEIGHT
+# 2.0 -> 5.0 (dose-response probe), and (b) DISTILL.HINT_WEIGHT 2.0 with
+# HINT_MODE 'spatial': the student's conv4 map (512 x 16x8) is projected
+# by a loss-only 1x1 conv (512 -> 768) and matched PER POSITION against
+# the teacher ViT's last-block patch tokens (HINT_BLOCK -1), captured
+# non-destructively via a forward hook — both grids are 16x8 at stride
+# 16, so the correspondence is exact and the hint carries 128x more
+# signal than the pooled 'global' variant
+# (..._rep_embed5_hint.yml, kept as the ablation fallback). Warm start =
+# rep_embed best (unfolded; embed_proj reloads, hint_proj is new).
+# Attribution caveat: credit is shared between (a) and (b) if this arm
+# wins. Expect an e1 Distill spike (5x embed + fresh hint projector).
+# Judge: clean vs 88.591, probe non-regression after fold.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed/transformer_best_e000038_map0.88591.pth'
+  PRETRAIN_HW_RATIO: 1
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'osnet_ain_x1_0_rep'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  JPEG_PROB: 0.5
+  JPEG_QUALITY: [20, 90]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 16
+
+DISTILL:
+  ENABLED: True
+  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_aug2_jpeg.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_aug2_jpeg/transformer_best_*.pth'
+  LOGIT_WEIGHT: 1.0
+  REL_WEIGHT: 30.0
+  EMBED_WEIGHT: 5.0
+  HINT_WEIGHT: 2.0
+  HINT_MODE: 'spatial'
+  HINT_BLOCK: -1
+  EMBED_PROJ_DIM: 768
+  TEMPERATURE: 4.0
+
+SOLVER:
+  OPTIMIZER_NAME: 'Adam'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.0001
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 64
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  5e-4
+  WEIGHT_DECAY_BIAS: 5e-4
+  BIAS_LR_FACTOR: 1
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+
+OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed5_shint'

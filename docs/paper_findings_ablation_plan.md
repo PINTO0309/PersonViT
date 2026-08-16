@@ -634,9 +634,30 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   cls-token warm start). L_cam teacher is fine for S (geometry
   representable at 0.49). Warm start S jpeg best 92.954; judge clean
   vs 92.954 + probe non-regression; no fold step (no rep branches).
-- Queued next per the round plan: EMBED_WEIGHT 5.0 probe on P,
-  ViT-S-as-teacher TA arm (config only), dual-teacher partial-L_cam
-  rel-KD (small code).
+- **P embed5+hint arm (ready — ladder step 4, deliberately combined by
+  decision)**: `osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed5_hint.yml` —
+  EMBED_WEIGHT 2.0→5.0 (dose-response) + new DISTILL.HINT_WEIGHT 2.0
+  (FitNets-style: pooled conv4 → loss-only hint_proj 512→768 → cosine
+  toward the teacher's FINAL embedding; teacher-side surgery avoided by
+  design). Backbone stashes hint_feat when collect_hint is set;
+  hint-incapable backbones raise. Warm start rep_embed best 88.591
+  (embed_proj reloads, hint_proj new); eval-path parity 0.0. If the
+  combined arm wins, credit is shared — split only if warranted. Also
+  measured: tail soup (best e38 + last e40) = 88.60, +0.01, dead axis.
+  **Upgraded to a SPATIAL hint before any run** (user decision):
+  HINT_MODE 'spatial' captures the teacher ViT's last-block patch tokens
+  non-destructively (forward hook on blocks[HINT_BLOCK], no vendored
+  code/forward/checkpoint change), reshapes them to a [768,16,8] map
+  (cls dropped, row-major — order verified against the raw hook
+  output), and matches the 1x1-conv-projected student conv4 map per
+  position (grids align exactly at stride 16; 128x the signal of the
+  pooled variant). First-run arm:
+  `osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed5_shint.yml`; the global
+  variant is kept as the ablation fallback. Raw block output is the
+  target (cosine is scale-invariant; final LN not applied).
+- Queued next per the round plan: ViT-S-as-teacher TA arm (config
+  only), dual-teacher partial-L_cam rel-KD (small code), stem-IN + rep
+  + embed + L_cam integration arm (gated on the stem_attn verdict).
 
 ## Measurement checklist per arm
 

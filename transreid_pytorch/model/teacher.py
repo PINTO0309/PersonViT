@@ -41,6 +41,36 @@ class TeacherModel(nn.Module):
         self.core.eval()
         for p in self.core.parameters():
             p.requires_grad_(False)
+        # non-destructive intermediate-token capture for the spatial hint:
+        # a forward hook on one transformer block keeps a reference to its
+        # token output — no vendored-code change, no forward change, no
+        # checkpoint impact, zero extra compute
+        self._hint_tokens = None
+        self._hint_hw = None
+
+    def enable_hint_capture(self, block_index):
+        blocks = getattr(self.core.base, 'blocks', None)
+        if blocks is None:
+            raise NotImplementedError('spatial hint capture needs a ViT '
+                                      'teacher with .blocks')
+        blocks[block_index].register_forward_hook(
+            lambda module, inputs, output: setattr(self, '_hint_tokens', output))
+
+    def hint_map(self):
+        """Captured tokens as a [B, D, H, W] map (cls dropped, row-major grid).
+
+        Raw block output is used as the target: the per-position cosine loss
+        is scale-invariant, so the final LayerNorm is not applied.
+        """
+        if self._hint_tokens is None:
+            raise RuntimeError('hint capture is not enabled or no forward ran')
+        patch = self._hint_tokens[:, 1:]
+        b, n, d = patch.shape
+        img_h, img_w = self._hint_hw
+        w = int(round((n * img_w / img_h) ** 0.5))
+        h = n // w
+        assert h * w == n, 'token count {} does not tile {}x{}'.format(n, h, w)
+        return patch.transpose(1, 2).reshape(b, d, h, w)
 
     def train(self, mode=True):
         # stay in eval mode even when the surrounding trainer calls .train()
@@ -48,6 +78,7 @@ class TeacherModel(nn.Module):
 
     @torch.no_grad()
     def forward(self, x, cam_label=None, view_label=None):
+        self._hint_hw = (x.shape[2], x.shape[3])
         core = self.core
         global_feat = core.base(x, cam_label=cam_label, view_label=view_label)
         if core.reduce_feat_dim:
@@ -84,4 +115,7 @@ def build_teacher(cfg, num_classes, camera_num, view_num):
             len(result.missing_keys), result.missing_keys[:3]))
     print('Loaded teacher weights from {} (unexpected keys: {})'.format(
         weight_path, len(result.unexpected_keys)))
-    return TeacherModel(core)
+    teacher = TeacherModel(core)
+    if cfg.DISTILL.HINT_WEIGHT > 0 and cfg.DISTILL.HINT_MODE == 'spatial':
+        teacher.enable_hint_capture(cfg.DISTILL.HINT_BLOCK)
+    return teacher

@@ -176,6 +176,17 @@ _C.DISTILL.REL_WEIGHT = 30.0
 # student instead (FitNets-style hint; dropped at export)
 _C.DISTILL.EMBED_WEIGHT = 0.0
 _C.DISTILL.EMBED_PROJ_DIM = 0
+# FitNets-style intermediate hint on the student's conv4 feature map
+# (loss-only hint_proj; OSNet backbones only — they expose hint_feat).
+# HINT_MODE 'global': pooled conv4 -> Linear -> cosine toward the teacher's
+# final embedding (a mid-network gradient shortcut). HINT_MODE 'spatial':
+# 1x1-Conv-projected conv4 map matched per position against the teacher
+# ViT's intermediate patch tokens (captured non-destructively with a
+# forward hook on blocks[HINT_BLOCK]; both grids are 16x8 at stride 16,
+# so the correspondence is exact) — 128x more signal than 'global'.
+_C.DISTILL.HINT_WEIGHT = 0.0
+_C.DISTILL.HINT_MODE = 'global'
+_C.DISTILL.HINT_BLOCK = -1
 _C.DISTILL.TEMPERATURE = 4.0
 
 # ---------------------------------------------------------------------------- #
