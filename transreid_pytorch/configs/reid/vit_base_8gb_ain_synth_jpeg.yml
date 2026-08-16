@@ -11,7 +11,17 @@
 # officials + probe as usual.
 MODEL:
   PRETRAIN_CHOICE: 'self'
-  PRETRAIN_PATH: 'logs/reid_vit_base_8gb_ain_aug2_jpeg/transformer_best_e000036_map0.92301.pth'
+  # centers_init_synth.pth = the no-cam best (92.30) with its classifier
+  # replaced by class-center initialization for the 8,119-id space
+  # (tools/init_classifier_centers.py) — CE starts with meaningful
+  # gradients instead of spending the schedule maturing a random head
+  # (lesson from the cam-teacher round 1). Regenerate on the training
+  # machine if absent:
+  #   python tools/init_classifier_centers.py \
+  #     --config configs/reid/vit_base_8gb_ain_synth_jpeg.yml \
+  #     --weight "logs/reid_vit_base_8gb_ain_aug2_jpeg/transformer_best_*.pth" \
+  #     --output logs/reid_vit_base_8gb_ain_aug2_jpeg/centers_init_synth.pth
+  PRETRAIN_PATH: 'logs/reid_vit_base_8gb_ain_aug2_jpeg/centers_init_synth.pth'
   PRETRAIN_HW_RATIO: 2
   METRIC_LOSS_TYPE: 'triplet'
   IF_LABELSMOOTH: 'off'

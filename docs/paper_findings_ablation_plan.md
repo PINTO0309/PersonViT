@@ -707,6 +707,22 @@ representation (headroom ~1.9), so the experiment's real question is
 whether synthetic diversity helps or dilutes the REAL domains. Gates:
 overall > 93.83, d00–d04 non-regression, officials + probe as usual.
 
+**Round 1 result (e40): d05 SOLVED (100.0 mAP/R1), real domains
+neutral, no generalization uplift yet.** Per-domain vs zero-shot: d00
++0.38 / d01 −0.28 / d02 −0.22 / d03 d04 flat; legacy val 93.4 (best
+still the e1 warm-start eval 93.488). Probe (legacy): clean 93.36
+(−0.14), mean-8 1.33 (vs 1.26), jpeg-q20 −1.27 (improved), warm −4.07
+(worse). Officials mixed: duke_occ +0.29, msmt17 −0.19, rest ±0.05.
+Diagnosis: the 8,119-way head trained from scratch and ended immature
+(Acc 0.96 still climbing, terminal loss ~1.65 = CE residue; the
+classifier could not warm-start across the id-space change — the ViT
+load_param DOES inherit same-shape classifiers, so extension rounds
+keep the head). Round 2
+(`vit_base_8gb_ain_synth_cam_jpeg2.yml`, warm start = round-1
+checkpoint_last incl. classifier, fresh 40ep cosine) decides the
+adoption question: judge legacy mAP vs 93.50 + probe/officials with a
+mature head; d05 must hold 100.
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
