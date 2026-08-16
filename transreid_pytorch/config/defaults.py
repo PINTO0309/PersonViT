@@ -294,6 +294,11 @@ _C.TEST.FEAT_NORM = 'yes'
 _C.TEST.DIST_MAT = "dist_mat.npy"
 # Whether calculate the eval score option: 'True', 'False'
 _C.TEST.EVAL = False
+# restrict the validation query/gallery to these unified domain ids
+# (e.g. [0, 1, 2, 3, 4] = the legacy 5-domain split, keeping train-log
+# mAP comparable across dataset generations). Empty = all domains.
+# Training data is never filtered; applies to the 'reid' dataset only.
+_C.TEST.VAL_DOMAINS = []
 # ---------------------------------------------------------------------------- #
 # Misc options
 # ---------------------------------------------------------------------------- #

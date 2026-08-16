@@ -687,6 +687,26 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   only), dual-teacher partial-L_cam rel-KD (small code), stem-IN + rep
   + embed + L_cam integration arm (gated on the stem_attn verdict).
 
+## SyntheticReID33 integration (d05, round 1)
+
+The 6-domain unified set is live: d05 = SyntheticReID33 (400 train ids,
+16,000/400/3,600, cameras c033–c065) → totals 191,560 / 5,144 / 33,542,
+8,119 train ids, 66 cameras. Integration checks: layout/protocol
+invariants all pass (40 imgs/id, 8 cams/id, 32 cross-camera positives
+per query, images 128x256); targeted SHA check: 0 duplicate groups
+involve d05 (the 2,503 intra-domain groups are known d01/d03 source
+artifacts — the build's all-domain SHA gate was skipped for exactly
+this reason and should later split intra- vs cross-domain).
+
+Teacher round 1: `vit_base_8gb_ain_synth_cam_jpeg.yml` (B flagship
+recipe + warm start from 93.50; classifier re-inits for 8,119 ids).
+**Baselines on the NEW 6-domain val (old flagship zero-shot): overall
+93.83** — d00 95.44 / d01 91.60 / d02 97.80 / d03 93.47 / d04 99.77 /
+**d05 98.13 zero-shot** — the synthetic domain is EASY for the existing
+representation (headroom ~1.9), so the experiment's real question is
+whether synthetic diversity helps or dilutes the REAL domains. Gates:
+overall > 93.83, d00–d04 non-regression, officials + probe as usual.
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)

@@ -22,6 +22,7 @@ Usage (from transreid_pytorch/):
 import argparse
 import glob
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -146,6 +147,26 @@ def main():
            'opts': args.opts}
     if args.dataset != 'reid':  # keep pre-existing unified-split cache keys valid
         key['dataset'] = args.dataset
+    else:
+        # the unified split can change on disk (new domains get integrated),
+        # so fingerprint the val set in the key: TEST.VAL_DOMAINS restricts
+        # it (legacy-comparable numbers) and the counts invalidate entries
+        # cached against an older build
+        reid_dataset = REID(root=cfg.DATASETS.ROOT_DIR, verbose=False)
+        if cfg.TEST.VAL_DOMAINS:
+            keep = set(cfg.TEST.VAL_DOMAINS)
+
+            def _domain_of(sample):
+                return int(re.search(r'_d(\d+)_',
+                                     os.path.basename(sample[0])).group(1))
+
+            reid_dataset.query = [s for s in reid_dataset.query
+                                  if _domain_of(s) in keep]
+            reid_dataset.gallery = [s for s in reid_dataset.gallery
+                                    if _domain_of(s) in keep]
+        key['val'] = {'domains': sorted(cfg.TEST.VAL_DOMAINS) or 'all',
+                      'query': len(reid_dataset.query),
+                      'gallery': len(reid_dataset.gallery)}
     rows = cache.get(key)
     if rows is not None and {row['condition'] for row in rows} != set(CONDITIONS):
         rows = None  # the condition set grew since this entry was cached
@@ -167,7 +188,7 @@ def main():
                 return extract(model, samples, transforms, desc=desc)
 
         if args.dataset == 'reid':
-            datasets = [('reid', REID(root=cfg.DATASETS.ROOT_DIR, verbose=False))]
+            datasets = [('reid', reid_dataset)]
         else:
             datasets = [(ds_name, loader(root=cfg.DATASETS.ROOT_DIR, verbose=False))
                         for ds_name, loader in OFFICIAL_DATASETS.items()]
@@ -206,8 +227,12 @@ def main():
                   + _render(rows, markdown=False))
 
     print('\nmodel  : {}'.format(target))
-    print('dataset: {}'.format('unified reid test split' if args.dataset == 'reid'
-                               else 'official splits (query-weighted aggregate)'))
+    if args.dataset == 'reid':
+        print('dataset: unified reid test split{}'.format(
+            ' (domains {})'.format(sorted(cfg.TEST.VAL_DOMAINS))
+            if cfg.TEST.VAL_DOMAINS else ''))
+    else:
+        print('dataset: official splits (query-weighted aggregate)')
     print('mode   : {} shifted'.format('query only' if args.mode == 'query' else 'query+gallery'))
     if from_cache:
         print('cache  : reused from {}'.format(cache.path))

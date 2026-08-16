@@ -1,0 +1,87 @@
+# Unified reid dataset + SyntheticReID33 (d05) / B teacher fine-tune / 8 GB GPU
+# First training round on the 6-domain unified set (d05 = SyntheticReID33:
+# +400 train ids, +33 global cameras -> 8,119 ids / 66 cameras). Derived
+# from the tier's best recipe (B-ain-aug2-cam-jpeg, 93.50 on the 5-domain
+# split) with the SAME L_cam + JPEG/CJ/blur recipe; warm start = that
+# best checkpoint (the classifier head re-inits automatically for the new
+# id count — load_param skips classifier keys; the camera-proxy bank is
+# training state and picks up the 66-camera space on its own).
+# IMPORTANT: the unified val split changed (5,144 queries incl. 400
+# synthetic), so train-log mAP is NOT comparable to 93.50 — judge on
+# (1) tools/eval_per_domain.py d00-d04 vs the old flagship (real-domain
+# non-regression gate), (2) d05 gain vs the old flagship's d05 baseline,
+# (3) official splits + style-shift probe as usual. This teacher feeds
+# the student ladder only if the real-domain gate passes.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_vit_base_8gb_ain_aug2_cam_jpeg/transformer_best_e000040_map0.93500.pth'
+  PRETRAIN_HW_RATIO: 2
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'vit_base_ain_patch16_224_TransReID'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  JPEG_PROB: 0.5
+  JPEG_QUALITY: [20, 90]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 16
+
+CAMPROXY:
+  ENABLED: True
+
+SOLVER:
+  OPTIMIZER_NAME: 'SGD'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.00006
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 32
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  1e-4
+  WEIGHT_DECAY_BIAS: 1e-4
+  BIAS_LR_FACTOR: 2
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+  # legacy-comparable validation: score only d00-d04 during training so the
+  # train-log mAP reads directly against the 5-domain lineage (93.50 /
+  # zero-shot 93.83-overall baselines use the full split — re-eval with
+  # TEST.VAL_DOMAINS "[]" for the 6-domain number)
+  VAL_DOMAINS: [0, 1, 2, 3, 4]
+
+OUTPUT_DIR: 'logs/reid_vit_base_8gb_ain_synth_cam_jpeg'

@@ -1,3 +1,5 @@
+import os.path as osp
+
 import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
@@ -81,6 +83,22 @@ def make_dataloader(cfg):
         dataset = OURAPI(root_train=cfg.DATASETS.ROOT_TRAIN_DIR, root_val=cfg.DATASETS.ROOT_VAL_DIR, config=cfg)
     else:
         dataset = __factory[cfg.DATASETS.NAMES](root=cfg.DATASETS.ROOT_DIR)
+
+    if cfg.TEST.VAL_DOMAINS and cfg.DATASETS.NAMES == 'reid':
+        # legacy-comparable validation: keep only the listed unified domains
+        # in the val split (training data stays untouched), so mAP can be
+        # read against numbers measured before a new domain was integrated
+        import re as _re
+        keep = set(cfg.TEST.VAL_DOMAINS)
+
+        def _domain_of(sample):
+            return int(_re.search(r'_d(\d+)_', osp.basename(sample[0])).group(1))
+
+        n_q, n_g = len(dataset.query), len(dataset.gallery)
+        dataset.query = [s for s in dataset.query if _domain_of(s) in keep]
+        dataset.gallery = [s for s in dataset.gallery if _domain_of(s) in keep]
+        print('validation restricted to domains {}: query {} -> {}, gallery {} -> {}'.format(
+            sorted(keep), n_q, len(dataset.query), n_g, len(dataset.gallery)))
 
     if cfg.INPUT.NPO_PROB > 0:
         # domain-conditional paste needs the sample's domain slot, so NPO
