@@ -670,6 +670,11 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   and embed_proj reload, hint_proj new), hint_proj auto-sized per tier
   (N 640→768, T 768→768), builds verified. Judge: clean vs the tier
   best, probe non-regression after fold.
+  **N result — GATE PASSED (+0.28): best 89.206** (e40), reproducing
+  P's +0.26 almost exactly. Probe (folded): clean 89.21, jpeg-q20
+  −2.20, warm −8.61, mean-8 3.30 — every condition at or better than
+  N rep_embed (−2.24 / 3.51). T pending; README/ONNX batch update
+  after T lands.
 - Queued next per the round plan: ViT-S-as-teacher TA arm (config
   only), dual-teacher partial-L_cam rel-KD (small code), stem-IN + rep
   + embed + L_cam integration arm (gated on the stem_attn verdict).
