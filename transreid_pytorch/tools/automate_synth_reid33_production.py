@@ -3,8 +3,9 @@
 
 The supervisor never logs the API key. It removes the fixed tmpfs secret as soon
 as all remote Batch work has reached a terminal state, then continues with local
-repair, full QA, validation, and unified-dataset construction. The mandatory 5%
-human review remains a deliberate stop rather than being fabricated.
+repair, full QA, and validation. Unified-dataset construction remains available
+unless ``--no-integrate`` is selected. Review waivers are recorded rather than
+fabricating review results.
 """
 
 from __future__ import annotations
@@ -23,7 +24,7 @@ from typing import Any, Mapping, Sequence
 
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_ROOT = HERE.parent / "data" / "SyntheticReID33_native_quarter_prod"
+DEFAULT_ROOT = HERE.parent / "data" / "SyntheticReID33"
 SECRET_PATH = Path("/dev/shm/personvit_openai_api_key")
 PENDING_STATUSES = frozenset({"planned", "blocked_on_refs", "submitted"})
 
@@ -43,9 +44,10 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 class Supervisor:
-    def __init__(self, root: Path, poll_seconds: int) -> None:
+    def __init__(self, root: Path, poll_seconds: int, no_integrate: bool = False) -> None:
         self.root = root.resolve()
         self.poll_seconds = poll_seconds
+        self.no_integrate = no_integrate
         self.state_dir = self.root / "state"
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.status_path = self.state_dir / "production_supervisor.json"
@@ -154,16 +156,10 @@ class Supervisor:
     def repair_if_needed(self) -> bool:
         if self.manifest_count() == 20_000:
             return True
-        self.run([
-            sys.executable,
-            str(self.generator),
-            "--root",
-            str(self.root),
-            "repair-local",
-            "--scope",
-            "full",
-            "--dry-run",
-        ])
+        # repair-local evaluates every stale processing version in a temporary
+        # directory before committing files and the manifest. Running a dry-run
+        # first therefore duplicates the dominant full-dataset QA work without
+        # adding an extra atomicity guarantee.
         result = self.run([
             sys.executable,
             str(self.generator),
@@ -185,6 +181,18 @@ class Supervisor:
         return True
 
     def run_local_qa(self) -> bool:
+        report_path = self.root / "qa" / "full_report.json"
+        if report_path.exists():
+            existing = json.loads(report_path.read_text(encoding="utf-8"))
+            waiver = existing.get("explicit_user_waiver") or {}
+            if (
+                waiver.get("authorized")
+                and waiver.get("authorized_by") == "user"
+                and existing.get("release_ready_pending_manual_review")
+                and int(existing.get("accepted", 0)) == 20_000
+            ):
+                self.log("full embedding/near-duplicate QA skipped under explicit user waiver")
+                return True
         self.status("running_full_qa", manifest_images=self.manifest_count())
         result = self.run([
             sys.executable,
@@ -195,7 +203,6 @@ class Supervisor:
             "--scope",
             "full",
         ])
-        report_path = self.root / "qa" / "full_report.json"
         report: Mapping[str, Any] = {}
         if report_path.exists():
             report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -213,7 +220,10 @@ class Supervisor:
         validation = self.run([sys.executable, str(self.validator), str(self.root)])
         if validation.returncode != 0:
             combined = f"{validation.stdout}\n{validation.stderr}"
-            if "full manual review gate has not passed" in combined:
+            if (
+                "full manual review gate has not passed" in combined
+                or "stratified 5% full_review.json is missing" in combined
+            ):
                 self.status(
                     "awaiting_manual_review",
                     review_template=str(self.root / "qa" / "full_review.template.json"),
@@ -248,6 +258,21 @@ class Supervisor:
         self.status("complete", manifest_images=20_000, unified_root=str(unified_root))
         return True
 
+    def validate_standalone_only(self) -> bool:
+        validation = self.run([sys.executable, str(self.validator), str(self.root)])
+        if validation.returncode != 0:
+            self.status(
+                "blocked_standalone_validation",
+                last_command_exit=validation.returncode,
+            )
+            return False
+        self.status(
+            "standalone_complete_not_integrated",
+            manifest_images=20_000,
+            integration_performed=False,
+        )
+        return True
+
     def execute(self) -> int:
         self.status("starting", job_status=self.job_counts(), manifest_images=self.manifest_count())
         if not self.advance_remote_batches():
@@ -263,6 +288,8 @@ class Supervisor:
             return 3
         if not self.run_local_qa():
             return 4
+        if self.no_integrate:
+            return 0 if self.validate_standalone_only() else 5
         if not self.validate_and_integrate():
             return 5
         return 0
@@ -272,6 +299,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--poll-seconds", type=int, default=60)
+    parser.add_argument(
+        "--no-integrate",
+        action="store_true",
+        help="validate the standalone dataset and stop without modifying data/reid",
+    )
     return parser.parse_args()
 
 
@@ -279,7 +311,7 @@ def main() -> int:
     args = parse_args()
     if args.poll_seconds < 15:
         raise SystemExit("--poll-seconds must be at least 15")
-    supervisor = Supervisor(args.root, args.poll_seconds)
+    supervisor = Supervisor(args.root, args.poll_seconds, no_integrate=args.no_integrate)
     lock_path = supervisor.state_dir / "production_supervisor.lock"
     with lock_path.open("w", encoding="utf-8") as lock:
         try:

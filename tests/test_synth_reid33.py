@@ -34,6 +34,7 @@ from generate_synth_reid33 import (  # noqa: E402
     _local_sibling_raw_candidates,
     _merge_jobs,
     _paths,
+    _publish_candidate,
     _refresh_and_collect,
     _prepare_retries,
     _repair_side_anchor_from_mirror,
@@ -47,6 +48,7 @@ from generate_synth_reid33 import (  # noqa: E402
     repair_pilot,
     report_local_failures,
 )
+from automate_synth_reid33_production import Supervisor  # noqa: E402
 from probe_synth_reid33_reference_sizes import (  # noqa: E402
     REFERENCE_VARIANTS,
     STANDARD_PRICING,
@@ -57,6 +59,8 @@ from probe_synth_reid33_reference_sizes import (  # noqa: E402
 )
 from evaluate_synth_reid33_adoption import evaluate_adoption  # noqa: E402
 from synth_reid33_core import (  # noqa: E402
+    SYNTHETIC_RELEASE_FILENAME_VERSION,
+    SYNTHETIC_RELEASE_PID_SCOPE,
     allocate_identity_cameras,
     allocate_pilot_cameras,
     approval_payload,
@@ -84,6 +88,7 @@ from synth_reid33_core import (  # noqa: E402
     read_jsonl,
     reconcile_batch_output,
     sha256_file,
+    synthetic_release_filename,
     validate_pilot,
     validate_camera_geometry,
     validate_plan,
@@ -1694,6 +1699,56 @@ def test_local_sibling_repair_selects_same_identity_camera_and_mirrors_walking_s
     assert derived.getpixel((10, 100))[0] < derived.getpixel((90, 100))[0]
 
 
+def test_local_sibling_repair_can_add_occlusion_to_same_camera_clean_frame(tmp_path):
+    source_raw = tmp_path / "source-clean.jpg"
+    Image.new("RGB", (100, 200), (180, 190, 200)).save(source_raw, quality=100)
+    target = {
+        "sample_id": "target-query",
+        "local_pid": 419,
+        "local_camera": 12,
+        "split": "query",
+        "occluded": True,
+        "occluder": "bollard",
+        "target_occlusion_ratio": 0.2874,
+        "body_yaw_deg": 90,
+        "frame": 4,
+        "pose": "walking left foot forward",
+        "generation_seed": 456,
+    }
+    source = {
+        **target,
+        "sample_id": "source-gallery",
+        "split": "gallery",
+        "occluded": False,
+        "occluder": None,
+        "target_occlusion_ratio": 0.0,
+        "body_yaw_deg": 45,
+        "frame": 3,
+    }
+    job = {"custom_id": "full-source-gallery-a1"}
+    attempt = {"classification": "succeeded"}
+    candidates = _local_sibling_raw_candidates(
+        target["sample_id"],
+        {target["sample_id"]: target, source["sample_id"]: source},
+        {source["sample_id"]: [(job, attempt, source_raw)]},
+    )
+
+    assert candidates[0][0]["sample_id"] == source["sample_id"]
+    destination = tmp_path / "occluded.jpg"
+    transform = _render_local_sibling_raw(
+        source_raw,
+        destination,
+        source,
+        target,
+        source_qa={"detector_person_bbox": [25, 20, 50, 160]},
+    )
+    occluded = Image.open(destination).convert("RGB")
+
+    assert transform["synthetic_occluder"]["applied"] is True
+    assert transform["synthetic_occluder"]["kind"] == "bollard"
+    assert any(minimum != maximum for minimum, maximum in occluded.getextrema())
+
+
 def test_full_local_repair_uses_sibling_when_api_returned_no_image(
     tmp_path, config, monkeypatch
 ):
@@ -1886,6 +1941,61 @@ def test_full_embedding_qa_requires_osnet_without_both_explicit_waivers(tmp_path
 def _save_image(path: Path, color: tuple[int, int, int]):
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (128, 256), color).save(path, quality=95)
+
+
+def test_publish_candidate_is_idempotent_without_publishing_residue(tmp_path):
+    source = tmp_path / "candidates" / "s00000.jpg"
+    _save_image(source, (10, 20, 30))
+    row = {
+        "final_path": "candidates/s00000.jpg",
+        "split": "train",
+        "sample_id": "s00000",
+        "local_pid": 0,
+        "domain_global": 5,
+        "global_camera": 33,
+    }
+
+    _publish_candidate(tmp_path, row)
+    row["final_path"] = "candidates/s00000.jpg"
+    _publish_candidate(tmp_path, row)
+
+    destination = tmp_path / "accepted" / "train" / "p00000_d05_c033_000000.jpg"
+    assert destination.exists()
+    assert destination.samefile(source)
+    assert not destination.with_suffix(".publishing").exists()
+    assert row["final_path"] == "accepted/train/p00000_d05_c033_000000.jpg"
+    assert row["release_filename_version"] == SYNTHETIC_RELEASE_FILENAME_VERSION
+    assert row["release_pid_scope"] == SYNTHETIC_RELEASE_PID_SCOPE
+    assert row["release_sequence"] == 0
+
+
+def test_synthetic_release_filename_matches_unified_reid_convention():
+    row = {
+        "sample_id": "s19999",
+        "local_pid": 499,
+        "domain_global": 5,
+        "global_camera": 65,
+    }
+
+    assert synthetic_release_filename(row) == "p00499_d05_c065_019999.jpg"
+
+
+def test_supervisor_no_integrate_stops_after_standalone_validation(tmp_path, monkeypatch):
+    supervisor = Supervisor(tmp_path, poll_seconds=60, no_integrate=True)
+    calls = []
+    monkeypatch.setattr(supervisor, "advance_remote_batches", lambda: True)
+    monkeypatch.setattr(supervisor, "delete_secret", lambda: None)
+    monkeypatch.setattr(supervisor, "repair_if_needed", lambda: True)
+    monkeypatch.setattr(supervisor, "run_local_qa", lambda: True)
+    monkeypatch.setattr(
+        supervisor, "validate_standalone_only", lambda: calls.append("standalone") or True
+    )
+    monkeypatch.setattr(
+        supervisor, "validate_and_integrate", lambda: calls.append("integrated") or True
+    )
+
+    assert supervisor.execute() == 0
+    assert calls == ["standalone"]
 
 
 def test_manifest_validator_detects_duplicate_sha(tmp_path):

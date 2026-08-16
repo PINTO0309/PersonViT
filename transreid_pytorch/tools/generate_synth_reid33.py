@@ -38,6 +38,8 @@ from PIL import Image
 from synth_reid33_core import (
     PROCESSING_VERSION,
     SCHEMA_VERSION,
+    SYNTHETIC_RELEASE_FILENAME_VERSION,
+    SYNTHETIC_RELEASE_PID_SCOPE,
     aggregate_usage,
     allocate_identity_cameras,
     allocate_pilot_cameras,
@@ -67,6 +69,8 @@ from synth_reid33_core import (
     sample_prompt,
     sha256_bytes,
     sha256_file,
+    synthetic_release_filename,
+    synthetic_release_sequence,
     usage_cost_usd,
     utc_now,
     validate_pilot,
@@ -1657,10 +1661,25 @@ def _retrieval_metrics(features: Any, rows: Sequence[Mapping[str, Any]]) -> dict
 
 def _publish_candidate(root: Path, row: dict[str, Any]) -> None:
     source = root / row["final_path"]
-    destination = root / "accepted" / str(row["split"]) / f"{row['sample_id']}.jpg"
+    destination = root / "accepted" / str(row["split"]) / synthetic_release_filename(row)
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_suffix(".publishing")
     temporary.unlink(missing_ok=True)
+    row["release_filename_version"] = SYNTHETIC_RELEASE_FILENAME_VERSION
+    row["release_pid_scope"] = SYNTHETIC_RELEASE_PID_SCOPE
+    row["release_sequence"] = synthetic_release_sequence(row)
+    # POSIX rename/replace is permitted to do nothing when source and
+    # destination are hard links to the same inode.  On an idempotent QA run,
+    # creating another hard link at ``temporary`` and replacing an already
+    # published destination would therefore leave ``*.publishing`` behind.
+    # Reuse the existing publication directly when it is already the source.
+    try:
+        already_published = destination.exists() and os.path.samefile(source, destination)
+    except OSError:
+        already_published = False
+    if already_published:
+        row["final_path"] = str(destination.relative_to(root))
+        return
     try:
         os.link(source, temporary)
     except OSError:
@@ -1683,6 +1702,228 @@ def _full_embedding_acceptance_models(root: Path) -> tuple[tuple[str, ...], tupl
     if osnet_waived:
         return ("vit",), ("osnet",)
     return ("vit", "osnet"), ()
+
+
+def _full_review_artifacts(
+    root: Path,
+    accepted: Sequence[Mapping[str, Any]],
+    boundary_rows: Sequence[Mapping[str, Any]] = (),
+) -> tuple[list[Path], list[Path], Path]:
+    review_rows = []
+    accepted_by_pid: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
+    for row in accepted:
+        accepted_by_pid[int(row["local_pid"])].append(row)
+    for pid in sorted(accepted_by_pid):
+        pid_rows = accepted_by_pid[pid]
+        for occluded in (False, True):
+            candidates = [row for row in pid_rows if bool(row["occluded"]) == occluded]
+            if candidates:
+                review_rows.append(min(
+                    candidates,
+                    key=lambda row: sha256_bytes(
+                        f"review|{row['local_camera']}|{pid}|{occluded}|{row['sample_id']}".encode()
+                    ),
+                ))
+    review_rows = review_rows[:1000]
+    sheet_paths = []
+    for chunk_index in range(0, len(review_rows), 200):
+        sheet_paths.append(_write_contact_sheet(
+            root,
+            review_rows[chunk_index : chunk_index + 200],
+            filename=f"full_contact_sheet_{chunk_index // 200:02d}.jpg",
+        ))
+    boundary_sheet_paths = []
+    ordered_boundaries = sorted(
+        {str(row["sample_id"]): row for row in boundary_rows}.values(),
+        key=lambda row: str(row["sample_id"]),
+    )
+    for chunk_index in range(0, len(ordered_boundaries), 200):
+        boundary_sheet_paths.append(_write_contact_sheet(
+            root,
+            ordered_boundaries[chunk_index : chunk_index + 200],
+            filename=f"full_boundary_contact_sheet_{chunk_index // 200:02d}.jpg",
+        ))
+    manual_template = root / "qa" / "full_review.template.json"
+    template = (
+        json.loads(manual_template.read_text(encoding="utf-8"))
+        if manual_template.exists()
+        else {
+            "complete": False,
+            "sample_fraction": 0.05,
+            "reviewed_all_boundary_cases": False,
+            "major_anatomy_failures": 0,
+            "text_logo_watermark_failures": 0,
+            "identity_consistency_rate": 0.0,
+            "camera_pitch_consistency_rate": 0.0,
+            "camera_geometry_failures": 0,
+            "reviewer_notes": (
+                "Copy to full_review.json after the stratified 5%, labeled camera pitch, and all "
+                "boundary cases are reviewed."
+            ),
+        }
+    )
+    template["reviewed_contact_sheets"] = [
+        str(path.relative_to(root)) for path in sheet_paths
+    ]
+    template["reviewed_boundary_contact_sheets"] = [
+        str(path.relative_to(root)) for path in boundary_sheet_paths
+    ]
+    atomic_write_json(manual_template, template)
+    return sheet_paths, boundary_sheet_paths, manual_template
+
+
+def finalize_full_qa_waiver(
+    root: Path,
+    config: Mapping[str, Any],
+    waiver_reason: str,
+) -> dict[str, Any]:
+    """Publish geometry-passed samples while explicitly recording skipped full QA."""
+    reason = waiver_reason.strip()
+    if not reason:
+        raise PipelineError("a non-empty full QA waiver reason is required")
+    paths = initialize(root, config)
+    rows = read_jsonl(paths["manifest"])
+    if len(rows) != 20_000:
+        raise PipelineError(f"full QA waiver requires 20,000 samples; found {len(rows)}")
+    invalid = [
+        str(row.get("sample_id"))
+        for row in rows
+        if not row.get("qa", {}).get("accepted")
+        or not row.get("qa", {}).get("framing", {}).get("pass")
+        or row.get("processing_version") != PROCESSING_VERSION
+    ]
+    if invalid:
+        raise PipelineError(
+            f"full QA waiver cannot bypass geometry/processing failures: {invalid[:10]}"
+        )
+    skipped_checks = [
+        "vit_full_embedding",
+        "osnet_full_embedding",
+        "phash_near_duplicate_comparison",
+    ]
+    waiver = {
+        "authorized": True,
+        "authorized_by": "user",
+        "recorded_at": utc_now(),
+        "reason": reason,
+        "skipped_checks": skipped_checks,
+        "geometry_qa_required": True,
+        "exact_sha_uniqueness_still_required": True,
+    }
+    for row in rows:
+        qa = row.setdefault("qa", {})
+        qa["embedding"] = {
+            "vit": {"skipped": True, "waived": True},
+            "osnet": {"skipped": True, "waived": True},
+        }
+        qa["embedding_pass"] = None
+        qa["phash_duplicate_pass"] = None
+        row["qa_status"] = "accepted"
+        row["qa_waiver"] = waiver
+        _publish_candidate(root, row)
+    atomic_write_jsonl(paths["manifest"], sorted(rows, key=lambda row: row["sample_id"]))
+    attempts = read_jsonl(paths["attempts"])
+    boundary_ids = {
+        str(row.get("sample_id"))
+        for row in attempts
+        if row.get("scope") == "full"
+        and row.get("sample_id")
+        and (
+            row.get("classification") != "succeeded"
+            or row.get("qa", {}).get("accepted") is False
+        )
+    }
+    boundary_ids.update(
+        str(row["sample_id"])
+        for row in rows
+        if (row.get("selection") or {}).get("method") == "local_sibling_reprocess"
+    )
+    boundary_rows = [row for row in rows if str(row["sample_id"]) in boundary_ids]
+    sheet_paths, boundary_sheet_paths, manual_template = _full_review_artifacts(
+        root, rows, boundary_rows
+    )
+    report = {
+        "created_at": utc_now(),
+        "model_id": config["model"]["api_id"],
+        "catalog_snapshot": config["model"]["catalog_snapshot"],
+        "reference_inputs": _reference_metadata(config),
+        "generated": len(rows),
+        "accepted": len(rows),
+        "rejected": 0,
+        "complete": False,
+        "automatic_qa_complete": False,
+        "release_ready_pending_manual_review": True,
+        "phash_near_duplicate_rate": None,
+        "retrieval_label_qa": {},
+        "embedding_acceptance_models": [],
+        "embedding_advisory_models": [],
+        "explicit_user_waiver": waiver,
+        "review_contact_sheets": [str(path.relative_to(root)) for path in sheet_paths],
+        "boundary_case_count": len(boundary_rows),
+        "boundary_contact_sheets": [
+            str(path.relative_to(root)) for path in boundary_sheet_paths
+        ],
+        "manual_review_template": str(manual_template.relative_to(root)),
+    }
+    atomic_write_json(root / "qa" / "full_report.json", report)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return report
+
+
+def record_full_manual_review_waiver(
+    root: Path,
+    config: Mapping[str, Any],
+    waiver_reason: str,
+) -> dict[str, Any]:
+    """Record an explicit user waiver without fabricating human review results."""
+    reason = waiver_reason.strip()
+    if not reason:
+        raise PipelineError("a non-empty manual review waiver reason is required")
+    paths = initialize(root, config)
+    rows = read_jsonl(paths["manifest"])
+    if len(rows) != 20_000 or any(row.get("qa_status") != "accepted" for row in rows):
+        raise PipelineError("manual review waiver requires exactly 20,000 accepted samples")
+    report_path = root / "qa" / "full_report.json"
+    if not report_path.exists():
+        raise PipelineError("manual review waiver requires full_report.json")
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    if int(report.get("accepted", 0)) != 20_000 or int(report.get("rejected", -1)) != 0:
+        raise PipelineError("manual review waiver requires 20,000 release candidates")
+    waiver = {
+        "authorized": True,
+        "authorized_by": "user",
+        "recorded_at": utc_now(),
+        "reason": reason,
+        "skipped_checks": [
+            "stratified_5_percent_manual_review",
+            "all_boundary_case_manual_review",
+        ],
+        "review_results_fabricated": False,
+    }
+    review = {
+        "complete": False,
+        "skipped": True,
+        "sample_fraction": 0.0,
+        "reviewed_contact_sheets": [],
+        "reviewed_boundary_contact_sheets": [],
+        "reviewed_all_boundary_cases": False,
+        "identity_consistency_rate": None,
+        "camera_pitch_consistency_rate": None,
+        "camera_geometry_failures": None,
+        "major_anatomy_failures": None,
+        "text_logo_watermark_failures": None,
+        "reviewer_notes": "Manual review was explicitly skipped; no human result is claimed.",
+        "explicit_user_waiver": waiver,
+    }
+    review_path = root / "qa" / "full_review.json"
+    atomic_write_json(review_path, review)
+    report["manual_review_complete"] = False
+    report["manual_review_skipped"] = True
+    report["manual_review_user_waiver"] = waiver
+    report["release_ready_for_integration"] = True
+    atomic_write_json(report_path, report)
+    print(json.dumps(review, ensure_ascii=False, indent=2))
+    return review
 
 
 def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Path) -> None:
@@ -1725,6 +1966,7 @@ def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Pa
             centroids.append(centroid)
         centroids = np.stack(centroids)
         similarities = candidate_vectors @ centroids.T
+        model_sha256 = sha256_file(model_path)
         for index, row in enumerate(rows):
             pid = int(row["local_pid"])
             own = float(similarities[index, pid])
@@ -1735,7 +1977,7 @@ def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Pa
                 "cosine_margin": round(own - impostor, 7),
                 "real_positive_p05": float(p05),
                 "above_real_positive_p05": own >= float(p05),
-                "model_sha256": sha256_file(model_path),
+                "model_sha256": model_sha256,
             }
         retrieval[model_key] = _retrieval_metrics(candidate_vectors, rows)
 
@@ -1777,7 +2019,7 @@ def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Pa
         if row["qa_status"] == "accepted":
             _publish_candidate(root, row)
         else:
-            published = root / "accepted" / str(row["split"]) / f"{row['sample_id']}.jpg"
+            published = root / "accepted" / str(row["split"]) / synthetic_release_filename(row)
             published.unlink(missing_ok=True)
             rejected.append(row)
 
@@ -1790,46 +2032,7 @@ def run_full_embedding_qa(root: Path, config: Mapping[str, Any], config_path: Pa
     atomic_write_jsonl(paths["manifest"], sorted(rows, key=lambda row: row["sample_id"]))
 
     accepted = [row for row in rows if row["qa_status"] == "accepted"]
-    review_rows = []
-    accepted_by_pid: dict[int, list[Mapping[str, Any]]] = defaultdict(list)
-    for row in accepted:
-        accepted_by_pid[int(row["local_pid"])].append(row)
-    for pid in sorted(accepted_by_pid):
-        pid_rows = accepted_by_pid[pid]
-        for occluded in (False, True):
-            candidates = [row for row in pid_rows if bool(row["occluded"]) == occluded]
-            if candidates:
-                review_rows.append(min(
-                    candidates,
-                    key=lambda row: sha256_bytes(
-                        f"review|{row['local_camera']}|{pid}|{occluded}|{row['sample_id']}".encode()
-                    ),
-                ))
-    review_rows = review_rows[:1000]
-    sheet_paths = []
-    for chunk_index in range(0, len(review_rows), 200):
-        sheet_paths.append(_write_contact_sheet(
-            root,
-            review_rows[chunk_index : chunk_index + 200],
-            filename=f"full_contact_sheet_{chunk_index // 200:02d}.jpg",
-        ))
-    manual_template = root / "qa" / "full_review.template.json"
-    if not manual_template.exists():
-        atomic_write_json(manual_template, {
-            "complete": False,
-            "sample_fraction": 0.05,
-            "reviewed_contact_sheets": [str(path.relative_to(root)) for path in sheet_paths],
-            "reviewed_all_boundary_cases": False,
-            "major_anatomy_failures": 0,
-            "text_logo_watermark_failures": 0,
-            "identity_consistency_rate": 0.0,
-            "camera_pitch_consistency_rate": 0.0,
-            "camera_geometry_failures": 0,
-            "reviewer_notes": (
-                "Copy to full_review.json after the stratified 5%, labeled camera pitch, and all "
-                "boundary cases are reviewed."
-            ),
-        })
+    _full_review_artifacts(root, accepted)
     full_report = {
         "created_at": utc_now(),
         "model_id": config["model"]["api_id"],
@@ -1982,10 +2185,14 @@ def _local_sibling_raw_candidates(
         if source_id == sample_id or source_id not in specs:
             continue
         source = specs[source_id]
-        if any(
-            source.get(key) != target.get(key)
-            for key in ("local_pid", "local_camera", "split", "occluded")
-        ):
+        if any(source.get(key) != target.get(key) for key in ("local_pid", "local_camera")):
+            continue
+        same_split = source.get("split") == target.get("split")
+        same_occlusion = source.get("occluded") == target.get("occluded")
+        synthetic_occlusion = bool(
+            target.get("occluded") and not source.get("occluded")
+        )
+        if not ((same_split and same_occlusion) or synthetic_occlusion):
             continue
         source_walking = _walking_side(source.get("pose")) is not None
         yaw_delta = abs(
@@ -1993,6 +2200,8 @@ def _local_sibling_raw_candidates(
         )
         yaw_delta = min(yaw_delta, 360 - yaw_delta)
         rank = (
+            not same_occlusion,
+            not same_split,
             source_walking != target_walking,
             yaw_delta,
             abs(int(source.get("frame", 0)) - int(target.get("frame", 0))),
@@ -2004,11 +2213,111 @@ def _local_sibling_raw_candidates(
     return [(source, job, attempt, raw) for _rank, source, job, attempt, raw in ranked]
 
 
+def _overlay_local_occluder(
+    image: Any,
+    person_bbox: Sequence[float],
+    target_sample: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Draw a deterministic, text-free foreground occluder over a clean sibling."""
+    import cv2
+    import numpy as np
+
+    height, width = image.shape[:2]
+    x, y, box_width, box_height = (float(value) for value in person_bbox)
+    x0 = max(0, min(width - 1, round(x)))
+    y0 = max(0, min(height - 1, round(y)))
+    x1 = max(x0 + 1, min(width, round(x + box_width)))
+    y1 = max(y0 + 1, min(height, round(y + box_height)))
+    box_width = x1 - x0
+    box_height = y1 - y0
+    seed = int(target_sample["generation_seed"])
+    patch = image[
+        max(0, y1 - max(4, box_height // 10)) : min(height, y1 + max(4, box_height // 10)),
+        max(0, x0 - box_width // 2) : min(width, x1 + box_width // 2),
+    ]
+    base = np.median(patch.reshape(-1, 3), axis=0) if patch.size else np.array([90, 90, 90])
+    base_color = tuple(int(max(30, min(185, value * 0.72))) for value in base)
+    light_color = tuple(int(min(220, value + 45)) for value in base_color)
+    dark_color = tuple(int(max(18, value - 35)) for value in base_color)
+    occluder = str(target_sample.get("occluder") or "foreground barrier").lower()
+    thickness = max(4, round(box_width * 0.035))
+
+    if "low wall" in occluder:
+        left = max(0, x0 - round(box_width * 0.45))
+        right = min(width - 1, x1 + round(box_width * 0.45))
+        top = min(height - 1, y0 + round(box_height * 0.64))
+        bottom = min(height - 1, y1 + round(box_height * 0.08))
+        cv2.rectangle(image, (left, top), (right, bottom), base_color, -1)
+        cv2.line(image, (left, top), (right, top), light_color, max(3, thickness // 2))
+        kind = "low_wall"
+    elif "bollard" in occluder:
+        center = x0 + round(box_width * (0.46 if seed % 2 else 0.54))
+        half_width = max(thickness * 2, round(box_width * 0.16))
+        top = y0 + round(box_height * 0.43)
+        bottom = min(height - 1, y1 + round(box_height * 0.04))
+        cv2.rectangle(
+            image,
+            (max(0, center - half_width), top),
+            (min(width - 1, center + half_width), bottom),
+            dark_color,
+            -1,
+        )
+        cv2.ellipse(
+            image,
+            (center, top),
+            (half_width, max(3, half_width // 3)),
+            0,
+            180,
+            360,
+            light_color,
+            -1,
+        )
+        kind = "bollard"
+    else:
+        left = max(0, x0 - round(box_width * 0.18))
+        right = min(width - 1, x1 + round(box_width * 0.18))
+        verticals = (0.08, 0.42, 0.76) if "cart" in occluder else (0.12, 0.50, 0.88)
+        horizontals = (0.58, 0.73, 0.88) if "cart" in occluder else (0.56, 0.72, 0.87)
+        for fraction in horizontals:
+            row = y0 + round(box_height * fraction)
+            cv2.line(image, (left, row), (right, row), light_color, thickness)
+            cv2.line(image, (left, row + thickness), (right, row + thickness), dark_color, max(2, thickness // 2))
+        for fraction in verticals:
+            column = left + round((right - left) * fraction)
+            cv2.line(
+                image,
+                (column, y0 + round(box_height * 0.53)),
+                (column, min(height - 1, y1 + round(box_height * 0.04))),
+                dark_color,
+                thickness,
+            )
+        if "cart" in occluder:
+            base_top = y0 + round(box_height * 0.88)
+            cv2.rectangle(
+                image,
+                (left, base_top),
+                (right, min(height - 1, y1 + round(box_height * 0.05))),
+                base_color,
+                -1,
+            )
+            kind = "luggage_cart"
+        else:
+            kind = "railing"
+    return {
+        "applied": True,
+        "kind": kind,
+        "source_person_bbox": [round(float(value), 3) for value in person_bbox],
+        "target_occluder": target_sample.get("occluder"),
+        "target_occlusion_ratio": target_sample.get("target_occlusion_ratio"),
+    }
+
+
 def _render_local_sibling_raw(
     source_raw: Path,
     destination: Path,
     source_sample: Mapping[str, Any],
     target_sample: Mapping[str, Any],
+    source_qa: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Create a deterministic local frame derivative without touching API raw data."""
     import cv2
@@ -2022,6 +2331,7 @@ def _render_local_sibling_raw(
     mirrored = source_side is not None and target_side is not None and source_side != target_side
     if mirrored:
         image = cv2.flip(image, 1)
+        transformed_shift = 0
     else:
         height, width = image.shape[:2]
         seed = int(target_sample["generation_seed"])
@@ -2034,6 +2344,19 @@ def _render_local_sibling_raw(
             flags=cv2.INTER_LINEAR,
             borderMode=cv2.BORDER_REFLECT_101,
         )
+        transformed_shift = shift_x
+    synthetic_occluder = {"applied": False}
+    if target_sample.get("occluded") and not source_sample.get("occluded"):
+        qa = source_qa or {}
+        bbox = qa.get("detector_person_bbox") or qa.get("person_bbox")
+        if not isinstance(bbox, Sequence) or isinstance(bbox, (str, bytes)) or len(bbox) != 4:
+            raise PipelineError("synthetic occlusion repair requires a source person bbox")
+        bbox = [float(value) for value in bbox]
+        if mirrored:
+            bbox[0] = image.shape[1] - (bbox[0] + bbox[2])
+        else:
+            bbox[0] += transformed_shift
+        synthetic_occluder = _overlay_local_occluder(image, bbox, target_sample)
     destination.parent.mkdir(parents=True, exist_ok=True)
     if not cv2.imwrite(str(destination), image, [cv2.IMWRITE_JPEG_QUALITY, 98]):
         raise PipelineError(f"failed to write local sibling derivative: {destination}")
@@ -2042,6 +2365,7 @@ def _render_local_sibling_raw(
         "source_walking_side": source_side,
         "target_walking_side": target_side,
         "non_mirrored_shift_fraction": 0.01,
+        "synthetic_occluder": synthetic_occluder,
     }
 
 
@@ -2246,13 +2570,21 @@ def repair_local(
                         sample_id, specs, raw_candidates
                     )
                     sibling_attempts = 0
-                    for source, source_job, _source_attempt, source_raw in sibling_rows:
+                    for source, source_job, source_attempt, source_raw in sibling_rows:
                         sibling_attempts += 1
                         local_raw = work / (
                             f"local-sibling-{source['sample_id']}-for-{sample_id}.jpg"
                         )
                         transform = _render_local_sibling_raw(
-                            source_raw, local_raw, source, sample
+                            source_raw,
+                            local_raw,
+                            source,
+                            sample,
+                            source_qa=(
+                                source_attempt.get("qa_reprocessed")
+                                or source_attempt.get("qa")
+                                or {}
+                            ),
                         )
                         candidate_path = work / (
                             f"local-sibling-final-{source['sample_id']}-for-{sample_id}.jpg"
@@ -2557,12 +2889,20 @@ def command_report_failures(args: argparse.Namespace, config: Mapping[str, Any])
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
+def command_waive_manual_review(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
+    record_full_manual_review_waiver(
+        args.root, config, str(args.waiver_reason or "")
+    )
+
+
 def command_report(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
     report = build_report(args.root, config)
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 
 def command_qa(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
+    if args.skip_embedding_duplicate_qa and args.scope != "full":
+        raise PipelineError("--skip-embedding-duplicate-qa is valid only for full scope")
     if args.scope == "pilot":
         run_embedding_qa(args.root, config, args.config.resolve())
         command_report(args, config)
@@ -2570,6 +2910,8 @@ def command_qa(args: argparse.Namespace, config: Mapping[str, Any]) -> None:
         report = run_rotation_pilot_qa(args.root, config, args.config.resolve())
         print(json.dumps(report, ensure_ascii=False, indent=2))
         command_report(args, config)
+    elif args.skip_embedding_duplicate_qa:
+        finalize_full_qa_waiver(args.root, config, str(args.waiver_reason or ""))
     else:
         run_full_embedding_qa(args.root, config, args.config.resolve())
 
@@ -2696,9 +3038,23 @@ def build_parser() -> argparse.ArgumentParser:
         "--scope", choices=("pilot", "rotation-pilot", "full"), required=True
     )
     failures.add_argument("--limit", type=int, default=100)
+    manual_waiver = sub.add_parser(
+        "waive-manual-review",
+        help="record an explicit user waiver for full manual review without fabricating results",
+    )
+    manual_waiver.add_argument("--waiver-reason", required=True)
     sub.add_parser("report", help="calculate pilot QA gates and measured cost forecast")
     qa = sub.add_parser("qa", help="run ViT/OSNet QA and create manual contact sheets")
     qa.add_argument("--scope", choices=("pilot", "rotation-pilot", "full"), default="pilot")
+    qa.add_argument(
+        "--skip-embedding-duplicate-qa",
+        action="store_true",
+        help="for full scope only, record a user-authorized waiver and prepare manual review",
+    )
+    qa.add_argument(
+        "--waiver-reason",
+        help="required audit reason with --skip-embedding-duplicate-qa",
+    )
     approve = sub.add_parser("approve", help="sign the pilot report and set the full-run ceiling")
     approve.add_argument("--quality", required=True, choices=("low",))
     approve.add_argument("--max-usd", required=True, type=float)
@@ -2729,6 +3085,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "repair-pilot": command_repair_pilot,
             "repair-local": command_repair_local,
             "report-failures": command_report_failures,
+            "waive-manual-review": command_waive_manual_review,
             "report": command_report,
             "qa": command_qa,
             "approve": command_approve,

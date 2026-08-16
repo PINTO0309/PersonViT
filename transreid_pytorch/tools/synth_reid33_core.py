@@ -94,6 +94,38 @@ PERSON_BOTTOM_CLEARANCE_FRACTION_MIN = 0.005
 FINAL_NAME_RE = re.compile(
     r"^p(?P<pid>\d{5})_d(?P<domain>\d{2})_c(?P<camera>\d{3})_(?P<seq>\d{6})\.jpe?g$"
 )
+SYNTHETIC_RELEASE_FILENAME_VERSION = "unified-reid-v1"
+SYNTHETIC_RELEASE_PID_SCOPE = "SyntheticReID33-local-contiguous"
+SYNTHETIC_SAMPLE_ID_RE = re.compile(r"^s(?P<sequence>\d{5})$")
+
+
+def synthetic_release_sequence(row: Mapping[str, Any]) -> int:
+    """Return the stable global sequence encoded by a SyntheticReID33 sample id."""
+    sample_id = str(row.get("sample_id", ""))
+    match = SYNTHETIC_SAMPLE_ID_RE.fullmatch(sample_id)
+    if match is None:
+        raise ValueError(f"invalid SyntheticReID33 sample id: {sample_id!r}")
+    return int(match.group("sequence"))
+
+
+def synthetic_release_filename(row: Mapping[str, Any]) -> str:
+    """Map one manifest row to the neutral unified-ReID filename schema.
+
+    The PID is contiguous within standalone SyntheticReID33 (train IDs first),
+    while domain and camera retain their reserved future unified values d05 and
+    c033..c065.  A later unified build is still free to remap PID globally.
+    """
+    pid = int(row.get("local_pid", -1))
+    domain = int(row.get("domain_global", -1))
+    camera = int(row.get("global_camera", -1))
+    sequence = synthetic_release_sequence(row)
+    if not 0 <= pid <= 99_999:
+        raise ValueError(f"local PID is outside the five-digit filename range: {pid}")
+    if not 0 <= domain <= 99:
+        raise ValueError(f"domain is outside the two-digit filename range: {domain}")
+    if not 0 <= camera <= 999:
+        raise ValueError(f"camera is outside the three-digit filename range: {camera}")
+    return f"p{pid:05d}_d{domain:02d}_c{camera:03d}_{sequence:06d}.jpg"
 
 
 def utc_now() -> str:
@@ -2391,6 +2423,7 @@ def validate_synthetic_manifest(
     root: Path,
     expected: Mapping[str, int] | None = None,
     require_accepted: bool = True,
+    require_release_filenames: bool = True,
 ) -> dict[str, Any]:
     """Validate the standalone accepted dataset before unified integration."""
     manifest_path = root / "manifest.jsonl"
@@ -2428,8 +2461,26 @@ def validate_synthetic_manifest(
         if not path.is_file():
             errors.append(f"{sample_id}: image is missing")
             continue
-        if path.name != f"{sample_id}.jpg":
-            errors.append(f"{sample_id}: final filename is not canonical")
+        if require_release_filenames:
+            try:
+                expected_name = synthetic_release_filename(row)
+            except (TypeError, ValueError) as exc:
+                errors.append(f"{sample_id}: cannot derive release filename: {exc}")
+            else:
+                expected_relative = f"accepted/{row.get('split')}/{expected_name}"
+                if relative != expected_relative:
+                    errors.append(
+                        f"{sample_id}: final_path is not canonical; expected {expected_relative}"
+                    )
+                match = FINAL_NAME_RE.fullmatch(path.name)
+                if match is None or path.name != expected_name:
+                    errors.append(f"{sample_id}: final filename is not unified-ReID canonical")
+                if row.get("release_filename_version") != SYNTHETIC_RELEASE_FILENAME_VERSION:
+                    errors.append(f"{sample_id}: unexpected release filename version")
+                if row.get("release_pid_scope") != SYNTHETIC_RELEASE_PID_SCOPE:
+                    errors.append(f"{sample_id}: unexpected release PID scope")
+                if row.get("release_sequence") != synthetic_release_sequence(row):
+                    errors.append(f"{sample_id}: release sequence does not match sample id")
         try:
             from PIL import Image
 
@@ -2523,16 +2574,41 @@ def validate_synthetic_manifest(
                 )
                 if positives < 32:
                     errors.append(f"pid {pid}: query lacks cross-camera positives")
-        for row in selected:
-            embedding = row.get("qa", {}).get("embedding", {})
-            if not all(embedding.get(model) for model in ("vit", "osnet")):
-                errors.append(f"{row.get('sample_id')}: missing full embedding QA")
-                break
         full_report_path = root / "qa" / "full_report.json"
+        full_report: Mapping[str, Any] = {}
         if not full_report_path.exists():
             errors.append("full automatic QA report is missing")
         else:
             full_report = json.loads(full_report_path.read_text(encoding="utf-8"))
+        waiver = full_report.get("explicit_user_waiver") or {}
+        required_skips = {
+            "vit_full_embedding",
+            "osnet_full_embedding",
+            "phash_near_duplicate_comparison",
+        }
+        full_qa_waived = bool(
+            waiver.get("authorized")
+            and waiver.get("authorized_by") == "user"
+            and set(waiver.get("skipped_checks") or ()) == required_skips
+            and str(waiver.get("reason") or "").strip()
+            and full_report.get("release_ready_pending_manual_review")
+            and int(full_report.get("accepted", 0)) == 20000
+            and int(full_report.get("rejected", -1)) == 0
+        )
+        if full_qa_waived:
+            for row in selected:
+                row_waiver = row.get("qa_waiver") or {}
+                if not row_waiver.get("authorized") or set(
+                    row_waiver.get("skipped_checks") or ()
+                ) != required_skips:
+                    errors.append(f"{row.get('sample_id')}: missing full QA waiver audit")
+                    break
+        else:
+            for row in selected:
+                embedding = row.get("qa", {}).get("embedding", {})
+                if not all(embedding.get(model) for model in ("vit", "osnet")):
+                    errors.append(f"{row.get('sample_id')}: missing full embedding QA")
+                    break
             if not full_report.get("complete") or int(full_report.get("accepted", 0)) != 20000:
                 errors.append("full automatic QA has not accepted exactly 20,000 images")
         review_path = root / "qa" / "full_review.json"
@@ -2540,7 +2616,7 @@ def validate_synthetic_manifest(
             errors.append("stratified 5% full_review.json is missing")
         else:
             review = json.loads(review_path.read_text(encoding="utf-8"))
-            review_ok = (
+            completed_review_ok = (
                 bool(review.get("complete"))
                 and float(review.get("sample_fraction", 0)) >= 0.05
                 and bool(review.get("reviewed_all_boundary_cases"))
@@ -2550,6 +2626,21 @@ def validate_synthetic_manifest(
                 and int(review.get("major_anatomy_failures", 0)) == 0
                 and int(review.get("text_logo_watermark_failures", 0)) == 0
             )
+            review_waiver = review.get("explicit_user_waiver") or {}
+            required_manual_skips = {
+                "stratified_5_percent_manual_review",
+                "all_boundary_case_manual_review",
+            }
+            waived_review_ok = bool(
+                review.get("skipped")
+                and review_waiver.get("authorized")
+                and review_waiver.get("authorized_by") == "user"
+                and set(review_waiver.get("skipped_checks") or ())
+                == required_manual_skips
+                and str(review_waiver.get("reason") or "").strip()
+                and review_waiver.get("review_results_fabricated") is False
+            )
+            review_ok = completed_review_ok or waived_review_ok
             if not review_ok:
                 errors.append("full manual review gate has not passed")
     return {
