@@ -673,8 +673,16 @@ identical), plain schedule extension (aug4), direct L_cam on the CNN
   **N result — GATE PASSED (+0.28): best 89.206** (e40), reproducing
   P's +0.26 almost exactly. Probe (folded): clean 89.21, jpeg-q20
   −2.20, warm −8.61, mean-8 3.30 — every condition at or better than
-  N rep_embed (−2.24 / 3.51). T pending; README/ONNX batch update
-  after T lands.
+  N rep_embed (−2.24 / 3.51).
+  **T result — REJECTED (flat)**: best 88.996 vs the 89.000 warm start
+  (−0.004, noise). The run itself was healthy (same spike/dip/recovery
+  shape as P/N); there was simply nothing left to gain. Consistent with
+  T's pattern of smallest gains all campaign (jpeg +0.08, rep+embed
+  +0.31, shint 0.00): the largest CNN reaches the
+  representable-teacher ceiling first. T lineage stays rep_embed
+  89.000 — README/ONNX already reflect it, no changes needed. Final
+  OSNet ladder: P 88.86 / N 89.21 / T 89.00 (P and N now within 0.15
+  and 0.21 of T at 46%/70% of its MACs).
 - Queued next per the round plan: ViT-S-as-teacher TA arm (config
   only), dual-teacher partial-L_cam rel-KD (small code), stem-IN + rep
   + embed + L_cam integration arm (gated on the stem_attn verdict).
