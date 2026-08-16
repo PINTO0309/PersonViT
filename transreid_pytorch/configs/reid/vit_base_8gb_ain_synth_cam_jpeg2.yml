@@ -1,0 +1,86 @@
+# Unified 6-domain dataset / B teacher round 2 (head-maturation extension) / 8 GB GPU
+# Extension of vit_base_8gb_ain_synth_cam_jpeg: round 1 ended with the
+# 8,119-way classifier still immature (Acc 0.96 and climbing at e40 —
+# the head trained from scratch while the backbone was warm; terminal
+# loss ~1.65 is CE residue, not a feature problem). This round warm
+# starts from round 1's checkpoint_last (e40) — load_param copies every
+# shape-matching key INCLUDING the classifier, so the head continues
+# from Acc ~0.96 instead of restarting — on a fresh 40-epoch cosine.
+# Round-1 outcome for reference: d05 solved (100.0), real domains
+# neutral (d00 +0.38 / d01 -0.28 / d02 -0.22 / d03 d04 flat), legacy
+# val 93.4 vs the 93.50 lineage best. Judge: Acc should START ~0.96 and
+# reach the mature 0.98+ band; legacy mAP vs 93.50; d05 must stay 100;
+# per-domain non-regression; officials + probe per the round-1 gates.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_vit_base_8gb_ain_synth_cam_jpeg/checkpoint_last.pth'
+  PRETRAIN_HW_RATIO: 2
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'vit_base_ain_patch16_224_TransReID'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  JPEG_PROB: 0.5
+  JPEG_QUALITY: [20, 90]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 16
+
+CAMPROXY:
+  ENABLED: True
+
+SOLVER:
+  OPTIMIZER_NAME: 'SGD'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.00006
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 32
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  1e-4
+  WEIGHT_DECAY_BIAS: 1e-4
+  BIAS_LR_FACTOR: 2
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+  # legacy-comparable validation: score only d00-d04 during training so the
+  # train-log mAP reads directly against the 5-domain lineage (93.50 /
+  # zero-shot 93.83-overall baselines use the full split — re-eval with
+  # TEST.VAL_DOMAINS "[]" for the 6-domain number)
+  VAL_DOMAINS: [0, 1, 2, 3, 4]
+
+OUTPUT_DIR: 'logs/reid_vit_base_8gb_ain_synth_cam_jpeg2'

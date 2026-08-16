@@ -310,12 +310,20 @@ class build_transformer(nn.Module):
             param_dict = param_dict['model']  # resume-format checkpoint (checkpoint_last.pth)
         elif 'state_dict' in param_dict:
             param_dict = param_dict['state_dict']
+        # shape-matching keys are copied — INCLUDING the classifier, so a
+        # same-id-space extension round inherits the mature head; mismatched
+        # keys (e.g. the classifier after an id-space change) fall through
+        # and keep their fresh initialization
+        skipped = []
         for i in param_dict:
             try:
                 self.state_dict()[i.replace('module.', '')].copy_(param_dict[i])
-            except:
-                continue
+            except Exception:
+                skipped.append(i)
         print('Loading pretrained model from {}'.format(trained_path))
+        if skipped:
+            print('load_param skipped {} keys (shape/name mismatch), e.g. {}'.format(
+                len(skipped), skipped[:3]))
 
 
 class build_transformer_local(nn.Module):
