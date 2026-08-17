@@ -749,6 +749,39 @@ cameras enriching L_cam, a path the no-cam recipe lacks. Next: student
 rounds on the 6-domain set (center-init + single round each), teachers:
 cam2 (93.594) for S, no-cam-synth (92.3, e40) for P/N/T.
 
+## Student rounds on the 6-domain set + the CNN ceiling law
+
+Results (center-init + single round each): **S 93.149** (+0.12, cam2
+teacher; officials msmt17 +0.68 / duke_occ +0.54 — the teacher's
+generalization gain propagates), **P 89.101** (+0.25, probe improved
+across the board: mean-8 3.09→2.98), **N flat** (best e1 89.228 ≈ the
+89.206 warm start; e40 = 89.08 legacy / d05 99.83 / probe improved
+mean-8 3.30→2.98), T pending. d05 solved on every finished tier
+(99.8–100). A light-recipe N ablation (rep + embed 2.0, no hint —
+T's recipe) is running to test whether excess teacher pressure causes
+the −0.13 legacy dip at the ceiling.
+
+**Finding — the heavy-KD recipe works exactly until the
+teacher-representable ceiling, which is capacity-independent.** The
+same embed5+shint recipe gave: N (old round, from 88.93) +0.28; P (old,
+from 88.59) +0.26; P (new, from 88.86) +0.25; but T (old, from 89.00)
+0.00 and N (new, from 89.21) flat. The boundary variable is not the
+tier or the recipe but the remaining distance to a common ceiling: all
+three CNN tiers converge to **89.0–89.2** — in INVERSE capacity order
+(P 2.2M → 89.10, N 3.3M → 89.23, T 4.6M → 89.00), re-confirming
+"capacity is not the axis". The ceiling is set by teacher quality minus
+the ViT→CNN structural gap (~teacher 92.3 − ~3.2, the same gap the 0.50
+rel-KD floor measures). Heavier KD (embed 5.0, spatial hint) increases
+information transferred per step, which pays exactly while a tier still
+has untransferred residual — larger students saturate the teacher in
+earlier rounds, so the smallest tier (P) kept benefiting longest
+(ladder totals: P +0.96, N +0.78, T +0.31 from their jpeg baselines).
+Implication: further CNN gains require raising the ceiling itself —
+i.e. a better CNN-representable teacher — not stronger transfer; the
+only known path is the stem-IN + L_cam integration arm gated on the
+stem_attn verdict (cam2's L_cam geometry stays unrepresentable, 0.77
+floor).
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
