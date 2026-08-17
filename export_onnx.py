@@ -213,7 +213,7 @@ AIN_AUG_MODELS = (
         architecture="OSNet-AIN x1.0",
         config="transreid_pytorch/configs/reid/osnet_p_8gb_distill_ain_aug2_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_aug3_jpeg_rep_embed5_shint/"
+            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_synth_shint/"
             "folded_best.pth"
         ),
         output="osnet_ain_x1_0_p_unified_aug.onnx",
