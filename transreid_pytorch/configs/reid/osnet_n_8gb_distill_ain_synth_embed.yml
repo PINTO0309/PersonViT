@@ -1,0 +1,87 @@
+# Unified 6-domain dataset / N student round, LIGHT recipe (rep + embed 2.0) / 8 GB GPU
+# Recipe ablation against osnet_n_8gb_distill_ain_synth_shint (which came
+# out flat: best e1 89.228, e40 89.1 vs the 89.206 warm start): drops the
+# spatial hint and lowers EMBED_WEIGHT 5.0 -> 2.0 — i.e. T's adopted
+# recipe applied to N. Hypothesis: under the weaker 6-domain no-cam
+# teacher (92.3) the heavy hint/embed-5 pressure has nothing left to
+# transfer at N's capacity and may be holding legacy back; the light
+# recipe worked for T (which was already at its ceiling). Warm start =
+# the SAME centers_init_synth.pth (hint_proj keys inside are simply
+# skipped by the loader). Judge: legacy vs 89.206 and vs the shint arm's
+# e40 (89.1 clean / mean-8 2.98 / d05 99.83); adopt whichever wins.
+MODEL:
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_osnet_n_8gb_distill_ain_jpeg_rep_embed5_shint/centers_init_synth.pth'
+  PRETRAIN_HW_RATIO: 1
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'osnet_ain_x1_25_rep'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  JPEG_PROB: 0.5
+  JPEG_QUALITY: [20, 90]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 16
+
+DISTILL:
+  ENABLED: True
+  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_synth_jpeg.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_synth_jpeg/teacher_synth_e40.pth'
+  LOGIT_WEIGHT: 1.0
+  REL_WEIGHT: 30.0
+  EMBED_WEIGHT: 2.0
+  EMBED_PROJ_DIM: 768
+  TEMPERATURE: 4.0
+
+SOLVER:
+  OPTIMIZER_NAME: 'Adam'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.0001
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 64
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  5e-4
+  WEIGHT_DECAY_BIAS: 5e-4
+  BIAS_LR_FACTOR: 1
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+  VAL_DOMAINS: [0, 1, 2, 3, 4]
+
+OUTPUT_DIR: 'logs/reid_osnet_n_8gb_distill_ain_synth_embed'
