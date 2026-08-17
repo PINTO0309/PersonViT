@@ -758,8 +758,14 @@ across the board: mean-8 3.09→2.98), **N flat** (best e1 89.228 ≈ the
 89.206 warm start; e40 = 89.08 legacy / d05 99.83 / probe improved
 mean-8 3.30→2.98), T pending. d05 solved on every finished tier
 (99.8–100). A light-recipe N ablation (rep + embed 2.0, no hint —
-T's recipe) is running to test whether excess teacher pressure causes
-the −0.13 legacy dip at the ceiling.
+T's recipe) tested whether excess teacher pressure causes the −0.13
+legacy dip at the ceiling: **flat as well** (best e1 89.216, e40 89.1 =
+the shint arm's 89.08) — pressure is NOT the cause; the dip is simply
+the cost of learning d05 while at the ceiling, and the recipe does not
+matter there (one more confirmation of the ceiling law). N adoption =
+the shint e40 (gates already passed). T finished flat too (best e1
+89.013; e40 88.91 legacy / d05 99.56 / probe improved warm −9.02→−8.70,
+q20 −2.22→−2.15) — T adoption = e40 by the same trade.
 
 **Finding — the heavy-KD recipe works exactly until the
 teacher-representable ceiling, which is capacity-independent.** The
