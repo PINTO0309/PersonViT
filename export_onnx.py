@@ -185,7 +185,7 @@ AIN_AUG_MODELS = (
         architecture="ViT-B/16",
         config="transreid_pytorch/configs/reid/vit_base_8gb_ain_aug2_cam_jpeg.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_vit_base_8gb_ain_aug2_cam_jpeg/"
+            "transreid_pytorch/logs/reid_vit_base_8gb_ain_synth_cam_jpeg2/"
             "transformer_best_*.pth"
         ),
         output="personvit_vitb16_ain_unified_aug.onnx",
