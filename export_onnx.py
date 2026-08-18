@@ -87,6 +87,9 @@ class ReleasedModel:
     # LiteSelfAttention blocks in `_attn` OSNet variants (adds Softmax, one
     # extra Gemm, and seven classified Reshapes per block).
     attention_blocks: int = 0
+    # camera-proxy mimicry branch (deployed residual MLP on the embedding):
+    # adds exactly two Gemm nodes and one Erf (GELU) to the graph.
+    cam_branch: bool = False
 
 
 def _released_model(
@@ -211,9 +214,9 @@ AIN_AUG_MODELS = (
         key="p-ain-aug",
         dataset="unified",
         architecture="OSNet-AIN x1.0",
-        config="transreid_pytorch/configs/reid/osnet_p_8gb_distill_ain_aug2_jpeg.yml",
+        config="transreid_pytorch/configs/reid/osnet_p_8gb_distill_ain_synth_cambr_folded.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_synth_shint/"
+            "transreid_pytorch/logs/reid_osnet_p_8gb_distill_ain_synth_cambr/"
             "folded_best.pth"
         ),
         output="osnet_ain_x1_0_p_unified_aug.onnx",
@@ -221,6 +224,7 @@ AIN_AUG_MODELS = (
         embedding_dimension=512,
         family="osnet",
         instance_norm_nodes=5,
+        cam_branch=True,
     ),
     ReleasedModel(
         key="n-ain-aug",
@@ -268,10 +272,15 @@ class ReIDExportWrapper(nn.Module):
         # The released configs use TEST.NECK_FEAT='before', so the benchmarked
         # inference descriptor is the Transformer backbone output before BNNeck.
         self.backbone = model.base
+        # the camera-proxy mimicry branch lives on the wrapper level of
+        # build_transformer and is part of the deployed feature
+        self.cam_branch = getattr(model, "cam_branch", None)
         self.l2_normalize = bool(l2_normalize)
 
     def forward(self, images: torch.Tensor) -> torch.Tensor:
         embeddings = self.backbone(images)
+        if self.cam_branch is not None:
+            embeddings = self.cam_branch.fuse(embeddings)
         if self.l2_normalize:
             embeddings = F.normalize(embeddings, p=2, dim=1, eps=1e-12)
         return embeddings
@@ -1308,12 +1317,19 @@ def validate_osnet_structure(
             f"for {spec.key}, found {len(instance_norm_nodes)}"
         )
 
-    expected_gemms = 1 + spec.attention_blocks
+    expected_gemms = 1 + spec.attention_blocks + (2 if spec.cam_branch else 0)
     gemm_nodes = [node for node in model.graph.node if node.op_type == "Gemm"]
     if len(gemm_nodes) != expected_gemms:
         raise RuntimeError(
             f"Expected {expected_gemms} Gemm nodes for {spec.key}, "
             f"found {len(gemm_nodes)}"
+        )
+    expected_erfs = 1 if spec.cam_branch else 0
+    erf_nodes = [node for node in model.graph.node if node.op_type == "Erf"]
+    if len(erf_nodes) != expected_erfs:
+        raise RuntimeError(
+            f"Expected {expected_erfs} Erf nodes for {spec.key}, "
+            f"found {len(erf_nodes)}"
         )
     softmax_nodes = [node for node in model.graph.node if node.op_type == "Softmax"]
     if len(softmax_nodes) != spec.attention_blocks:

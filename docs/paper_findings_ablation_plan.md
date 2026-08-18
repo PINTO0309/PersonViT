@@ -831,11 +831,24 @@ evaluation gates; adoption is judged on the standard gates only.
   learnable gamma (safety valve; optionally exposed as a runtime input
   so deployments can modulate the built-in whitening — no scene
   statistics needed, hence no small-N failure mode).
-- **Stage 2 — P training arm**: standard gates (legacy vs 89.101, d05
-  hold, probe non-regression after fold; officials at adoption).
-  Expected value if the branch captures 30–50% of the ViT-side L_cam
-  delta (+1.05..1.2): +0.3–0.6 — the only concrete proposal that beats
-  the 89.0–89.2 teacher ceiling without a new teacher.
+- **Stage 2 — P training arm — CEILING BROKEN: best 89.833 (+0.73)**,
+  monotone to e40. Both readouts positive: CamBr 16.4 → 0.200 (raw rel
+  ≈ 0.006 = the Stage-0 probe optimum) and **gamma 0.01 → 0.513** — the
+  first recruited branch of the campaign (vs 5 attention
+  self-suppressions; the difference is dedicated supervision carrying
+  information the trunk cannot pursue). Gates: 6-domain overall 90.62
+  (ALL domains up, d01 +0.99), d05 99.95, probe mean-8 2.98 → **2.43**
+  with warm −7.32 → **−5.28** — the L_cam robustness signature
+  (warm/cool) transferred to a CNN for the first time. Whitening probe:
+  raw sigma-margins lifted at every K (13.7→17.8 at K=2, 4.30→5.27 at
+  K=16), external-whitening crossover pushed K≥3 → K≥8, whitening now
+  clearly harmful at K=2 (17.8→12.1) — **the branch internalized the
+  nuisance suppression; the soma small-N failure mode is answered
+  structurally** (per-sample, no scene statistics). Trunk isolation
+  held throughout (Distill 0.790, normal regime). Eval/export note:
+  folded weights must be evaluated with MODEL.CAM_BRANCH on + plain
+  arch (the fused forward is the deployment path); the ONNX contract
+  needs the branch ops (Gemm+2, Erf+1) before the README/ONNX update.
 - **Stage 3 — rollout + export**: N/T configs; ONNX contract must gain
   the branch's op classes (first non-zero-cost inference addition of
   the campaign — keep the budget explicit in the spec).
