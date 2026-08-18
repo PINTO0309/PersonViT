@@ -1,5 +1,8 @@
 __pycache__/
 *.py[cod]
+.agents/skills/
+codex_skills/
+skill_archives/
 onnx/*.onnx
 onnx/eval_cache.json
 onnx/eval_log.txt
