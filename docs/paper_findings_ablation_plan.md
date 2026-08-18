@@ -788,6 +788,61 @@ only known path is the stem-IN + L_cam integration arm gated on the
 stem_attn verdict (cam2's L_cam geometry stays unrepresentable, 0.77
 floor).
 
+## Camera-proxy mimicry branch (staged plan)
+
+Motivation: the L_cam teacher is unrepresentable by the CNN trunk (0.77
+floor; forcing it caps recovery), yet external evidence (PINTO0309/soma,
+real-video tests of the no-cam OSNet) shows population-statistics
+whitening collapses with ≤4 people and stabilizes with more — i.e. the
+value of L_cam-style nuisance suppression is real, and a LEARNED,
+per-sample version of it would not depend on scene statistics at all.
+Idea (user proposal): a dedicated learnable branch mimics the camera
+proxy behavior; the cam teacher's signal flows ONLY into that branch
+(stop-gradient to the trunk — this removes the established harm
+mechanism outright, unlike dual-teacher weighting which still pushes the
+trunk); the deployed embedding fuses trunk + branch. Unlike the rejected
+tail-attention branches, this branch has its OWN supervision, so gate
+starvation cannot kill it — only the fusion has to earn its place.
+DECISION: the soma small-N scenario is deliberately NOT added to the
+evaluation gates; adoption is judged on the standard gates only.
+
+- **Stage 0 — feasibility probe (`tools/probe_cam_branch.py`) — PASSED,
+  with a surprise**: frozen no-cam P student (89.101 folded) + small
+  MLP heads per tap, 64k train samples / val = unified query. Results
+  (rel-KD ×30 vs cam2 / cos to delta): stem 4.45/0.914, conv2
+  3.51/0.922, conv3 2.34/0.931, **conv4 0.36/0.961, embed 0.18/0.971**
+  — the gate (< 0.6) is passed decisively at the LATE taps. (Caveat:
+  probe numbers are clean-image rel-only; historic floors are
+  train-time with augmentation + logit term — the margin absorbs it.)
+  Two findings: (1) the early-tap hypothesis is REFUTED — L_cam-relevant
+  information is richest AFTER the IN cascade, partially exonerating
+  the INs for the 0.77 floor (relevant to the pending stem_attn
+  verdict); (2) the floor must be re-read as an OBJECTIVE CONFLICT — a
+  single shared embedding cannot be CE/triplet-optimal and
+  L_cam-geometric at once — rather than missing information, which is
+  precisely the conflict the gradient-isolated branch removes. Stage 1
+  therefore taps the FINAL embedding: the branch collapses to a small
+  residual MLP head (~0.7M params, ~0.7 MMACs — near-zero cost, far
+  below the provisional +2–5% MACs budget).
+- **Stage 1 — branch implementation (gated on Stage 0)**: light 1x1-conv
+  branch (+2–5% MACs budget) from the best tap; distill target = the
+  teacher DELTA (purer than the full cam embedding); trunk protected by
+  stop-gradient; fusion = `final = trunk + gamma * branch` with a
+  learnable gamma (safety valve; optionally exposed as a runtime input
+  so deployments can modulate the built-in whitening — no scene
+  statistics needed, hence no small-N failure mode).
+- **Stage 2 — P training arm**: standard gates (legacy vs 89.101, d05
+  hold, probe non-regression after fold; officials at adoption).
+  Expected value if the branch captures 30–50% of the ViT-side L_cam
+  delta (+1.05..1.2): +0.3–0.6 — the only concrete proposal that beats
+  the 89.0–89.2 teacher ceiling without a new teacher.
+- **Stage 3 — rollout + export**: N/T configs; ONNX contract must gain
+  the branch's op classes (first non-zero-cost inference addition of
+  the campaign — keep the budget explicit in the spec).
+- Sequencing: composable with (not blocked by) the stem_attn verdict;
+  if stem-IN makes the trunk itself L_cam-representable, the branch and
+  the integration arm can be compared or combined.
+
 ## Measurement checklist per arm
 
 1. unified test (train log best + `eval_official.py`-style final check)
