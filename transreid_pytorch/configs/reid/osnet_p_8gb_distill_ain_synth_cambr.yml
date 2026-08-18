@@ -1,0 +1,101 @@
+# Unified 6-domain dataset / P camera-proxy mimicry branch arm (Stage 2) / 8 GB GPU
+# Stage-1 implementation trained on P. Base = the adopted P best recipe
+# (rep + embed5 + spatial hint, no-cam teacher e40) UNCHANGED for the
+# trunk; added: MODEL.CAM_BRANCH (residual MLP on the final embedding,
+# fused as feat + gamma*branch(feat), ~0.7M params — deployed at eval)
+# trained ONLY by the cam2 teacher via CAMBRANCH_REL (rel-KD on the
+# fused embedding) + CAMBRANCH_DELTA (cosine of the loss-only-projected
+# branch output to the cam2 - no-cam teacher delta). The trunk is
+# protected by stop-gradient — the Stage-0 probe showed the 0.77 floor
+# was an objective conflict on one shared embedding, which this
+# separation removes (frozen-feature heads reached rel-KD x30 = 0.18).
+# Warm start = P synth_shint best 89.101 (same id space: classifier and
+# all projectors reload; only cam_branch.* keys are new). Judge: legacy
+# vs 89.101, d05 hold, probe non-regression after fold; watch CamBr
+# (branch loss) convergence and gamma growth — gamma stuck near 0.01
+# with CamBr converged would mean the branch learned the geometry but
+# fusion rejects it (report both readouts separately).
+MODEL:
+  CAM_BRANCH: True
+  PRETRAIN_CHOICE: 'self'
+  PRETRAIN_PATH: 'logs/reid_osnet_p_8gb_distill_ain_synth_shint/transformer_best_e000039_map0.89101.pth'
+  PRETRAIN_HW_RATIO: 1
+  METRIC_LOSS_TYPE: 'triplet'
+  IF_LABELSMOOTH: 'off'
+  IF_WITH_CENTER: 'no'
+  NAME: 'transformer'
+  NO_MARGIN: True
+  DEVICE_ID: ('0')
+  TRANSFORMER_TYPE: 'osnet_ain_x1_0_rep'
+  STRIDE_SIZE: [16, 16]
+
+INPUT:
+  SIZE_TRAIN: [256, 128]
+  SIZE_TEST: [256, 128]
+  PROB: 0.5 # random horizontal flip
+  RE_PROB: 0.5 # random erasing
+  PADDING: 10
+  PIXEL_MEAN: [0.5, 0.5, 0.5]
+  PIXEL_STD: [0.5, 0.5, 0.5]
+  CJ_PROB: 0.5
+  CJ_BRIGHTNESS: 0.2
+  CJ_CONTRAST: 0.3
+  CJ_SATURATION: 0.2
+  CJ_HUE: 0.02
+  BLUR_PROB: 0.15
+  BLUR_SIGMA: [0.1, 2.0]
+  JPEG_PROB: 0.5
+  JPEG_QUALITY: [20, 90]
+
+DATASETS:
+  NAMES: ('reid')
+  ROOT_DIR: ('./data/')
+
+DATALOADER:
+  SAMPLER: 'domain_balanced_triplet'
+  DOMAIN_ALPHA: 0.5
+  NUM_INSTANCE: 4
+  NUM_WORKERS: 16
+
+DISTILL:
+  ENABLED: True
+  TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_synth_jpeg.yml'
+  TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_synth_jpeg/teacher_synth_e40.pth'
+  LOGIT_WEIGHT: 1.0
+  REL_WEIGHT: 30.0
+  EMBED_WEIGHT: 5.0
+  HINT_WEIGHT: 2.0
+  HINT_MODE: 'spatial'
+  HINT_BLOCK: -1
+  CAMBRANCH_TEACHER_CONFIG: 'configs/reid/vit_base_8gb_ain_synth_cam_jpeg2.yml'
+  CAMBRANCH_TEACHER_WEIGHT: 'logs/reid_vit_base_8gb_ain_synth_cam_jpeg2/transformer_best_*.pth'
+  CAMBRANCH_REL: 30.0
+  CAMBRANCH_DELTA: 2.0
+  EMBED_PROJ_DIM: 768
+  TEMPERATURE: 4.0
+
+SOLVER:
+  OPTIMIZER_NAME: 'Adam'
+  MAX_EPOCHS: 40
+  BASE_LR: 0.0001
+  WARMUP_EPOCHS: 5
+  IMS_PER_BATCH: 64
+  WARMUP_METHOD: 'cosine'
+  LARGE_FC_LR: False
+  SAVE_BEST: True
+  LOG_PERIOD: 50
+  EVAL_PERIOD: 1
+  WEIGHT_DECAY:  5e-4
+  WEIGHT_DECAY_BIAS: 5e-4
+  BIAS_LR_FACTOR: 1
+
+TEST:
+  EVAL: True
+  IMS_PER_BATCH: 128
+  RE_RANKING: False
+  WEIGHT: ''
+  NECK_FEAT: 'before'
+  FEAT_NORM: 'yes'
+  VAL_DOMAINS: [0, 1, 2, 3, 4]
+
+OUTPUT_DIR: 'logs/reid_osnet_p_8gb_distill_ain_synth_cambr'

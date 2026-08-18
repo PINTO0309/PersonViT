@@ -59,6 +59,12 @@ _C.MODEL.COS_CLASSIFIER = False
 _C.MODEL.COS_TEMPERATURE = 16.0
 
 _C.MODEL.DROPOUT_RATE = 0.0
+# camera-proxy mimicry branch (Stage 1 of the cam-branch plan): a small
+# residual MLP on the final embedding, trained ONLY by the cam-teacher
+# branch losses (gradient-isolated from the trunk), fused into the
+# deployed feature as `feat + gamma * branch(feat)`. Part of inference.
+_C.MODEL.CAM_BRANCH = False
+_C.MODEL.CAM_BRANCH_HIDDEN = 512
 # Reduce feature dim
 _C.MODEL.REDUCE_FEAT_DIM = False
 _C.MODEL.FEAT_DIM = 512
@@ -187,6 +193,15 @@ _C.DISTILL.EMBED_PROJ_DIM = 0
 _C.DISTILL.HINT_WEIGHT = 0.0
 _C.DISTILL.HINT_MODE = 'global'
 _C.DISTILL.HINT_BLOCK = -1
+# second (cam-lineage) teacher feeding ONLY the camera-proxy mimicry
+# branch: CAMBRANCH_REL = relational-KD weight on the FUSED embedding vs
+# this teacher; CAMBRANCH_DELTA = cosine weight on the loss-only-projected
+# branch output vs (cam teacher - main teacher) — the pure L_cam delta.
+# The trunk never receives these gradients (stop-gradient by design).
+_C.DISTILL.CAMBRANCH_TEACHER_CONFIG = ''
+_C.DISTILL.CAMBRANCH_TEACHER_WEIGHT = ''
+_C.DISTILL.CAMBRANCH_REL = 0.0
+_C.DISTILL.CAMBRANCH_DELTA = 0.0
 _C.DISTILL.TEMPERATURE = 4.0
 
 # ---------------------------------------------------------------------------- #

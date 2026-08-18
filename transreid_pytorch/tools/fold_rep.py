@@ -37,7 +37,10 @@ def fold_rep_state(state):
     """
     folded = {k: v.clone() for k, v in state.items()
               if REP_CONV not in k and not k.endswith(REP_ID)
-              and 'embed_proj.' not in k and 'hint_proj.' not in k}
+              and 'embed_proj.' not in k and 'hint_proj.' not in k
+              and 'cam_branch_delta_proj.' not in k}
+    # NOTE: cam_branch.mlp/gamma keys are DEPLOYED (part of the eval
+    # forward) and are intentionally kept
     for key, value in state.items():
         if key.endswith(REP_CONV):
             conv2 = folded[key[:-len(REP_CONV)] + '.conv2.weight']

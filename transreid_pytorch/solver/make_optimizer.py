@@ -20,6 +20,10 @@ def make_optimizer(cfg, model, center_criterion):
             # GeM exponent: decay would pull p toward 0, but the neutral
             # (GAP) point is p = 1 — let the task gradient alone move it
             weight_decay = 0.0
+        if key.endswith("cam_branch.gamma"):
+            # fusion gate of the camera-proxy mimicry branch: decay would
+            # bias the fusion toward off regardless of its usefulness
+            weight_decay = 0.0
         if cfg.SOLVER.LARGE_FC_LR:
             if "classifier" in key or "arcface" in key:
                 lr = cfg.SOLVER.BASE_LR * 2

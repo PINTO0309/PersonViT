@@ -3,6 +3,15 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+def relational_loss(student_feat, teacher_feat):
+    """Similarity-preserving loss between batch cosine-similarity matrices
+    (the rel-KD component, dimension-agnostic; used by DistillLoss and by
+    the camera-proxy mimicry branch)."""
+    s = F.normalize(student_feat.float(), dim=1)
+    t = F.normalize(teacher_feat.float(), dim=1)
+    return F.mse_loss(s @ s.t(), t @ t.t())
+
+
 class DistillLoss(nn.Module):
     """Knowledge-distillation losses for ReID, added on top of the base
     softmax + triplet objective.
@@ -59,10 +68,8 @@ class DistillLoss(nn.Module):
             loss = loss + self.logit_weight * kd
 
         if self.rel_weight > 0:
-            s = F.normalize(student_feat.float(), dim=1)
-            te = F.normalize(teacher_feat.float(), dim=1)
-            rel = F.mse_loss(s @ s.t(), te @ te.t())
-            loss = loss + self.rel_weight * rel
+            loss = loss + self.rel_weight * relational_loss(student_feat,
+                                                            teacher_feat)
 
         if self.embed_weight > 0:
             embed_feat = (projector(student_feat) if projector is not None

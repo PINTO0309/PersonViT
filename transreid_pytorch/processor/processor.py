@@ -138,6 +138,33 @@ def do_train(cfg,
         hint_base = _m.base if hint_proj is not None else None
         hint_spatial = (hint_proj is not None
                         and cfg.DISTILL.HINT_MODE == 'spatial')
+        # camera-proxy mimicry branch: second (cam-lineage) teacher whose
+        # signal reaches ONLY the branch (trunk features are detached)
+        cam_branch = getattr(_m, 'cam_branch', None)
+        branch_teacher = None
+        if (cam_branch is not None
+                and cfg.DISTILL.CAMBRANCH_TEACHER_CONFIG
+                and (cfg.DISTILL.CAMBRANCH_REL > 0
+                     or cfg.DISTILL.CAMBRANCH_DELTA > 0)):
+            from loss.distill_loss import relational_loss
+            from model.teacher import build_teacher as _build_teacher
+            bcfg = cfg.clone()
+            bcfg.defrost()
+            bcfg.DISTILL.TEACHER_CONFIG = cfg.DISTILL.CAMBRANCH_TEACHER_CONFIG
+            bcfg.DISTILL.TEACHER_WEIGHT = cfg.DISTILL.CAMBRANCH_TEACHER_WEIGHT
+            bcfg.DISTILL.HINT_WEIGHT = 0.0
+            bcfg.freeze()
+            # camera_num=0 is safe: the ViT teacher configs run without
+            # SIE_CAMERA, so build_transformer zeroes it internally anyway
+            branch_teacher = _build_teacher(
+                bcfg, num_classes=_m.classifier.weight.shape[0],
+                camera_num=0, view_num=0)
+            branch_teacher.to(local_rank)
+            branch_teacher.eval()
+            cam_branch_proj = getattr(_m, 'cam_branch_delta_proj', None)
+            logger.info('camera-proxy mimicry branch enabled '
+                        '(rel {} / delta {})'.format(cfg.DISTILL.CAMBRANCH_REL,
+                                                     cfg.DISTILL.CAMBRANCH_DELTA))
 
     cam_proxy_criterion = None
     if cfg.CAMPROXY.ENABLED:
@@ -152,6 +179,7 @@ def do_train(cfg,
     acc_meter = AverageMeter()
     distill_meter = AverageMeter()
     cam_meter = AverageMeter()
+    branch_meter = AverageMeter()
 
     evaluator = R1_mAP_eval(num_query, max_rank=50, feat_norm=cfg.TEST.FEAT_NORM)
     scaler = amp.GradScaler('cuda')
@@ -189,6 +217,7 @@ def do_train(cfg,
         acc_meter.reset()
         distill_meter.reset()
         cam_meter.reset()
+        branch_meter.reset()
         evaluator.reset()
         model.train()
         for n_iter, (img, vid, target_cam, target_view) in enumerate(train_loader):
@@ -216,6 +245,26 @@ def do_train(cfg,
                     cam_loss = cam_proxy_criterion(feat, target, target_cam)
                     cam_meter.update(cam_loss.item(), img.shape[0])
                     loss = loss + cfg.CAMPROXY.WEIGHT * cam_loss
+                if branch_teacher is not None:
+                    # gradient isolation: the trunk feature is detached, so
+                    # the cam-teacher pressure reaches only branch + gamma
+                    t_branch = branch_teacher(img, cam_label=target_cam,
+                                              view_label=target_view)[1]
+                    trunk = feat.detach()
+                    branch_out = cam_branch(trunk)
+                    branch_loss = feat.new_zeros(())
+                    if cfg.DISTILL.CAMBRANCH_REL > 0:
+                        fused = cam_branch.fuse(trunk, branch_out)
+                        branch_loss = branch_loss + cfg.DISTILL.CAMBRANCH_REL * \
+                            relational_loss(fused, t_branch)
+                    if cfg.DISTILL.CAMBRANCH_DELTA > 0:
+                        delta = (t_branch - teacher_feat).detach()
+                        branch_loss = branch_loss + cfg.DISTILL.CAMBRANCH_DELTA * (
+                            1 - torch.nn.functional.cosine_similarity(
+                                cam_branch_proj(branch_out).float(),
+                                delta.float(), dim=1)).mean()
+                    branch_meter.update(branch_loss.item(), img.shape[0])
+                    loss = loss + branch_loss
 
             scaler.scale(loss).backward()
 
@@ -244,6 +293,8 @@ def do_train(cfg,
                     msg += ", Distill: {:.3f}".format(distill_meter.avg)
                 if cam_proxy_criterion is not None:
                     msg += ", Cam: {:.3f}".format(cam_meter.avg)
+                if branch_meter.count > 0:
+                    msg += ", CamBr: {:.3f}".format(branch_meter.avg)
                 logger.info(msg)
 
         end_time = time.time()

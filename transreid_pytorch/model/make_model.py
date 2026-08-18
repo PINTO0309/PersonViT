@@ -172,6 +172,34 @@ class Backbone(nn.Module):
         #  print('Loading pretrained model from {}'.format(trained_path))
 
 
+class CameraProxyBranch(nn.Module):
+    """Camera-proxy mimicry branch (deployed): a residual MLP correction on
+    the final embedding, `fused = feat + gamma * mlp(feat)`.
+
+    The branch is trained exclusively by the cam-teacher branch losses with
+    the trunk feature detached (gradient isolation) — the Stage-0 probe
+    showed the L_cam geometry is extractable from the frozen final
+    embedding (rel-KD x30 = 0.18), and that the historic 0.77 floor was an
+    objective conflict on a single shared embedding, which this separation
+    removes. gamma starts small so warm starts stay function-preserving;
+    weight decay on gamma is disabled in solver/make_optimizer.py.
+    """
+
+    def __init__(self, dim, hidden=512):
+        super(CameraProxyBranch, self).__init__()
+        self.mlp = nn.Sequential(nn.Linear(dim, hidden), nn.GELU(),
+                                 nn.Linear(hidden, dim))
+        self.gamma = nn.Parameter(torch.full((1,), 0.01))
+
+    def forward(self, feat):
+        return self.mlp(feat)
+
+    def fuse(self, feat, branch_out=None):
+        if branch_out is None:
+            branch_out = self.mlp(feat)
+        return feat + self.gamma * branch_out
+
+
 class build_transformer(nn.Module):
     def __init__(self, num_classes, camera_num, view_num, cfg, factory):
         super(build_transformer, self).__init__()
@@ -275,6 +303,20 @@ class build_transformer(nn.Module):
                 self.hint_proj = nn.Linear(self.base.hint_channels,
                                            cfg.DISTILL.EMBED_PROJ_DIM, bias=False)
 
+        # camera-proxy mimicry branch: part of the DEPLOYED forward (eval
+        # returns the fused feature); its delta projector is loss-only
+        self.cam_branch = None
+        self.cam_branch_delta_proj = None
+        if cfg.MODEL.CAM_BRANCH:
+            self.cam_branch = CameraProxyBranch(self.in_planes,
+                                                cfg.MODEL.CAM_BRANCH_HIDDEN)
+            if cfg.DISTILL.ENABLED and cfg.DISTILL.CAMBRANCH_DELTA > 0:
+                if cfg.DISTILL.EMBED_PROJ_DIM <= 0:
+                    raise ValueError('DISTILL.CAMBRANCH_DELTA requires '
+                                     'EMBED_PROJ_DIM (teacher dim)')
+                self.cam_branch_delta_proj = nn.Linear(
+                    self.in_planes, cfg.DISTILL.EMBED_PROJ_DIM, bias=False)
+
         if pretrain_choice == 'self':
             self.load_param(model_path)
 
@@ -282,6 +324,8 @@ class build_transformer(nn.Module):
         global_feat = self.base(x, cam_label=cam_label, view_label=view_label)
         if self.reduce_feat_dim:
             global_feat = self.fcneck(global_feat)
+        if self.cam_branch is not None and not self.training:
+            global_feat = self.cam_branch.fuse(global_feat)
         feat = self.bottleneck(global_feat)
         feat_cls = self.dropout(feat)
 

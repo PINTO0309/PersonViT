@@ -373,10 +373,12 @@ def build_inference_model(
         view_num=0,
     )
     # Training-only auxiliaries are stripped before the strict load: the
-    # embedding-KD and intermediate-hint projectors exist purely for the
-    # distillation loss and have no inference path.
+    # embedding-KD / intermediate-hint / cam-branch-delta projectors exist
+    # purely for the distillation loss and have no inference path. The
+    # cam_branch module itself (mlp + gamma) is DEPLOYED and must load.
     state_dict = {k: v for k, v in state_dict.items()
-                  if not k.startswith(("embed_proj.", "hint_proj."))}
+                  if not k.startswith(("embed_proj.", "hint_proj.",
+                                       "cam_branch_delta_proj."))}
     # Unlike the repository's permissive inference loader, export requires an
     # exact match so a malformed or mismatched checkpoint cannot go unnoticed.
     model.load_state_dict(state_dict, strict=True)
