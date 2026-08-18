@@ -230,16 +230,17 @@ AIN_AUG_MODELS = (
         key="n-ain-aug",
         dataset="unified",
         architecture="OSNet-AIN x1.25",
-        config="transreid_pytorch/configs/reid/osnet_n_8gb_distill_ain_aug2_jpeg.yml",
+        config="transreid_pytorch/configs/reid/osnet_n_8gb_distill_ain_synth_cambr_folded.yml",
         checkpoint=(
-            "transreid_pytorch/logs/reid_osnet_n_8gb_distill_ain_synth_shint/"
-            "folded_e40.pth"
+            "transreid_pytorch/logs/reid_osnet_n_8gb_distill_ain_synth_cambr/"
+            "folded_best.pth"
         ),
         output="osnet_ain_x1_25_n_unified_aug.onnx",
         pretraining_epoch=0,
         embedding_dimension=512,
         family="osnet",
         instance_norm_nodes=5,
+        cam_branch=True,
     ),
     ReleasedModel(
         key="t-ain-aug",
