@@ -102,6 +102,9 @@ def build_teacher(cfg, num_classes, camera_num, view_num):
     # without this the student's EMBED_PROJ_DIM would grow an embed_proj on
     # the teacher and its checkpoint load would fail on the missing key.
     tcfg.DISTILL.ENABLED = False
+    # same leak class for student-side model additions: a teacher never
+    # carries the camera-proxy mimicry branch
+    tcfg.MODEL.CAM_BRANCH = False
     if tcfg.MODEL.JPM:
         raise NotImplementedError('JPM teachers are not supported')
     tcfg.freeze()
