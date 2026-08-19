@@ -849,9 +849,26 @@ evaluation gates; adoption is judged on the standard gates only.
   folded weights must be evaluated with MODEL.CAM_BRANCH on + plain
   arch (the fused forward is the deployment path); the ONNX contract
   needs the branch ops (Gemm+2, Erf+1) before the README/ONNX update.
-- **Stage 3 — rollout + export**: N/T configs; ONNX contract must gain
-  the branch's op classes (first non-zero-cost inference addition of
-  the campaign — keep the budget explicit in the spec).
+- **Stage 3 — rollout + export — COMPLETE, mechanism fully
+  reproducible**: N 89.958 (+0.73, gamma 0.520), T 89.867 (+0.85 — the
+  tier stuck longest at the old ceiling got the largest gain, gamma
+  0.517); CamBr terminals 0.198–0.205 across all tiers. Gates green
+  everywhere (d05 99.8–99.96; probes improved broadly, e.g. T warm
+  −8.70→−6.08; officials: msmt17 P .8832 / N .8831 / T .8863 — CNN
+  records, +1.2–1.3 each). New CNN ladder: **P 89.83 / N 89.96 / T
+  89.87** — converged on a new ceiling ~+0.75 above the old one,
+  exactly the ceiling-law prediction for a uniformly injected L_cam
+  delta. README/ONNX updated for all three (Params +0.53M per tier,
+  contract `cam_branch` field: Gemm+2, Erf census; the export wrapper
+  bug that silently dropped the branch was caught BY the contract).
+  External validation (reidtrack 2026-08-19, MOT17 + real clip): the
+  08-14 scale collapse (between-track cosine 0.85) is healed
+  (0.17–0.24), EER cuts land on the tracker's shipped gates
+  (drop-in), 20/21 cells over the previous build, and vs the legacy
+  torchreid descriptor the ordering flips exactly along the designed
+  trade — legacy keeps short-gap same-camera cells, the cam-branch
+  build takes 7/9 long-gap cells where re-identification decisions
+  actually happen.
 - Sequencing: composable with (not blocked by) the stem_attn verdict;
   if stem-IN makes the trunk itself L_cam-representable, the branch and
   the integration arm can be compared or combined.
