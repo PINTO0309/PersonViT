@@ -754,7 +754,7 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
   | jpeg-q40 | 0.9523 | 0.9748 | -0.0032 | -0.0011 |
   | jpeg-q20 | 0.9430 | 0.9693 | -0.0125 | -0.0066 |
 
-#### T-ain-aug - OSNet-AIN x1.5 - 4.6M
+#### T-ain-aug - OSNet-AIN x1.5 - 5.1M
 
 - unified test set eval
 
@@ -788,7 +788,7 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
   | jpeg-q40 | 0.9094 | 0.9568 | -0.0066 | -0.0045 |
   | jpeg-q20 | 0.8902 | 0.9418 | -0.0258 | -0.0195 |
 
-#### N-ain-aug - OSNet-AIN x1.25 - 3.3M
+#### N-ain-aug - OSNet-AIN x1.25 - 3.8M
 
 - unified test set eval
 
@@ -822,7 +822,7 @@ Best checkpoints per variant, evaluated on the unified test split. `-aug` indica
   | jpeg-q40 | 0.9072 | 0.9554 | -0.0064 | -0.0048 |
   | jpeg-q20 | 0.8877 | 0.9400 | -0.0259 | -0.0202 |
 
-#### P-ain-aug - OSNet-AIN x1.0 - 2.2M
+#### P-ain-aug - OSNet-AIN x1.0 - 2.7M
 
 - unified test set eval
 
