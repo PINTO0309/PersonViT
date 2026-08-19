@@ -17,3 +17,4 @@ _pyproject.toml
 .venv/
 *.pdf
 *.tar.gz
+docs/article/*
